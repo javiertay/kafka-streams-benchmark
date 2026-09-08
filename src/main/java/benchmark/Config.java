@@ -5,23 +5,36 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 
 record Config(
-        String bootstrapServers, Path truststore, String truststorePassword,
+        String bootstrapServers, String securityProtocol, Path truststore, String truststorePassword,
         String inputTopic, String outputTopic, List<Integer> eventCounts,
-        List<Integer> partitions, int payloadBytes, int uniqueKeys, int threads,
-        int warmupEvents, int iterations, long inputRate, int replicationFactor,
+        List<Integer> partitions, int payloadBytes, int uniqueKeys, List<Integer> processingThreads,
+        int warmupEvents, int iterations, List<Long> inputRates, int replicationFactor,
         int httpPort, Path resultsDir, int timeoutSeconds, String processingGuarantee,
         Map<String, String> extraKafkaProperties) {
 
     static Config from(Map<String, String> env) {
         String bootstrap = required(env, "KAFKA_BOOTSTRAP_SERVERS");
-        Path truststore = Path.of(required(env, "KAFKA_TRUSTSTORE_LOCATION"));
-        String password = required(env, "KAFKA_TRUSTSTORE_PASSWORD");
+        String securityProtocol = env.getOrDefault("KAFKA_SECURITY_PROTOCOL", "SSL").trim().toUpperCase(Locale.ROOT);
+        if (!Set.of("PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL").contains(securityProtocol)) {
+            throw new IllegalArgumentException(
+                    "KAFKA_SECURITY_PROTOCOL must be PLAINTEXT, SSL, SASL_PLAINTEXT, or SASL_SSL");
+        }
+        boolean usesSsl = securityProtocol.endsWith("SSL");
+        Path truststore = usesSsl ? Path.of(required(env, "KAFKA_TRUSTSTORE_LOCATION")) : null;
+        String password = usesSsl ? required(env, "KAFKA_TRUSTSTORE_PASSWORD") : null;
         var eventCounts = positiveList(env.getOrDefault("BENCHMARK_EVENT_COUNTS", "10000,100000,1000000"), "BENCHMARK_EVENT_COUNTS");
         var partitions = positiveList(env.getOrDefault("BENCHMARK_PARTITIONS", "1,3,6,12"), "BENCHMARK_PARTITIONS");
+        var processingThreads = positiveList(env.getOrDefault("BENCHMARK_PROCESSING_THREADS", "1"),
+                "BENCHMARK_PROCESSING_THREADS");
+        String configuredRates = env.getOrDefault("BENCHMARK_INPUT_RATES",
+                env.getOrDefault("BENCHMARK_INPUT_RATE", "0"));
+        var inputRates = nonNegativeLongList(configuredRates, "BENCHMARK_INPUT_RATES");
         for (int i = 1; i < partitions.size(); i++) {
             if (partitions.get(i) <= partitions.get(i - 1)) {
                 throw new IllegalArgumentException("BENCHMARK_PARTITIONS must be strictly ascending");
@@ -33,22 +46,22 @@ record Config(
                 extras.put(key.substring(15).toLowerCase().replace('_', '.'), value);
             }
         });
-        Config config = new Config(bootstrap, truststore, password,
+        Config config = new Config(bootstrap, securityProtocol, truststore, password,
                 env.getOrDefault("BENCHMARK_INPUT_TOPIC", "benchmark-input"),
                 env.getOrDefault("BENCHMARK_OUTPUT_TOPIC", "benchmark-output"),
                 eventCounts, partitions,
                 positiveInt(env, "BENCHMARK_PAYLOAD_BYTES", 1024),
                 positiveInt(env, "BENCHMARK_UNIQUE_KEYS", 1000),
-                positiveInt(env, "BENCHMARK_PROCESSING_THREADS", 1),
+                processingThreads,
                 nonNegativeInt(env, "BENCHMARK_WARMUP_EVENTS", 1000),
                 positiveInt(env, "BENCHMARK_ITERATIONS", 3),
-                nonNegativeLong(env, "BENCHMARK_INPUT_RATE", 0),
+                inputRates,
                 positiveInt(env, "BENCHMARK_REPLICATION_FACTOR", 1),
                 positiveInt(env, "BENCHMARK_HTTP_PORT", 8080),
                 Path.of(env.getOrDefault("BENCHMARK_RESULTS_DIR", "results")),
                 positiveInt(env, "BENCHMARK_TIMEOUT_SECONDS", 600),
                 env.getOrDefault("KAFKA_STREAMS_PROCESSING_GUARANTEE", "at_least_once"), extras);
-        if (!Files.isRegularFile(config.truststore())) {
+        if (usesSsl && !Files.isRegularFile(config.truststore())) {
             throw new IllegalArgumentException("KAFKA_TRUSTSTORE_LOCATION is not a readable file: " + config.truststore());
         }
         return config;
@@ -56,25 +69,27 @@ record Config(
 
     Properties kafkaProperties() {
         Properties properties = new Properties();
-        properties.put("bootstrap.servers", bootstrapServers);
-        properties.put("security.protocol", "SSL");
-        properties.put("ssl.truststore.location", truststore.toString());
-        properties.put("ssl.truststore.password", truststorePassword);
         extraKafkaProperties.forEach(properties::put);
+        properties.put("bootstrap.servers", bootstrapServers);
+        properties.put("security.protocol", securityProtocol);
+        if (truststore != null) {
+            properties.put("ssl.truststore.location", truststore.toString());
+            properties.put("ssl.truststore.password", truststorePassword);
+        }
         return properties;
     }
 
     Map<String, Object> safeConfiguration() {
         Map<String, Object> safe = new LinkedHashMap<>();
         safe.put("bootstrapServers", bootstrapServers);
-        safe.put("securityProtocol", "SSL");
-        safe.put("truststoreLocation", truststore.toString());
+        safe.put("securityProtocol", securityProtocol);
+        if (truststore != null) safe.put("truststoreLocation", truststore.toString());
         safe.put("inputTopic", inputTopic);
         safe.put("outputTopic", outputTopic);
         safe.put("payloadBytes", payloadBytes);
         safe.put("uniqueKeys", uniqueKeys);
-        safe.put("processingThreads", threads);
-        safe.put("inputRate", inputRate);
+        safe.put("processingThreadScenarios", processingThreads);
+        safe.put("inputRateScenarios", inputRates);
         return safe;
     }
 
@@ -106,9 +121,13 @@ record Config(
         return value;
     }
 
-    private static long nonNegativeLong(Map<String, String> env, String key, long fallback) {
-        long value = Long.parseLong(env.getOrDefault(key, Long.toString(fallback)));
-        if (value < 0) throw new IllegalArgumentException(key + " must not be negative");
-        return value;
+    private static List<Long> nonNegativeLongList(String value, String name) {
+        try {
+            List<Long> result = Arrays.stream(value.split(",")).map(String::trim).map(Long::parseLong).toList();
+            if (result.isEmpty() || result.stream().anyMatch(number -> number < 0)) throw new NumberFormatException();
+            return result;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException(name + " must be a comma-separated list of non-negative integers", exception);
+        }
     }
 }

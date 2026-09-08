@@ -10,9 +10,9 @@ import java.util.concurrent.atomic.AtomicReference;
 final class RunSupport {
     private RunSupport() {}
 
-    static Generation generate(Config config, String runId, int eventCount, long seed) throws Exception {
+    static Generation generate(Config config, String runId, int eventCount, long inputRate, long seed) throws Exception {
         long started = System.nanoTime();
-        long interval = config.inputRate() == 0 ? 0 : 1_000_000_000L / config.inputRate();
+        long interval = inputRate == 0 ? 0 : 1_000_000_000L / inputRate;
         AtomicReference<Exception> failure = new AtomicReference<>();
         try (var producer = KafkaSupport.producer(config)) {
             for (int sequence = 0; sequence < eventCount; sequence++) {
@@ -38,7 +38,8 @@ final class RunSupport {
 
     static BenchmarkResult result(Config config, String implementation, String runId, int iteration,
                                   int eventCount, int requestedPartitions, int actualPartitions,
-                                  Generation generation, StageMetrics metrics, long finishedNanos,
+                                  int processingThreads, long inputRate, Generation generation,
+                                  StageMetrics metrics, long finishedNanos,
                                   ResourceUsage resources, Validation validation, long gcCountBefore, long gcTimeBefore) {
         double elapsed = (finishedNanos - metrics.startedNanos) / 1_000_000_000.0;
         var runtime = ManagementFactory.getRuntimeMXBean();
@@ -49,7 +50,7 @@ final class RunSupport {
                 Runtime.getRuntime().maxMemory() / 1024 / 1024, String.join(" ", runtime.getInputArguments()),
                 Math.max(0, ResourceSampler.gcCount() - gcCountBefore), Math.max(0, ResourceSampler.gcTime() - gcTimeBefore));
         return new BenchmarkResult(implementation, java.time.Instant.now().toString(), runId, iteration, eventCount,
-                requestedPartitions, actualPartitions, config.payloadBytes(), config.threads(), config.inputRate(),
+                requestedPartitions, actualPartitions, config.payloadBytes(), processingThreads, inputRate,
                 generation.achievedRate(),
                 metrics.throughput(metrics.firstIngestNanos, metrics.lastIngestNanos, validation.consumed()),
                 Statistics.latency(metrics.ingestion),

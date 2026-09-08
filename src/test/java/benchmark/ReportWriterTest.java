@@ -3,6 +3,7 @@ package benchmark;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -35,5 +36,28 @@ class ReportWriterTest {
         assertEquals("Plain Java had 25.0% higher total throughput.", ReportWriter.winnerSummary(80, 100, true));
         assertEquals("Tie at the displayed precision.", ReportWriter.winnerSummary(1.001, 1.004, true));
         assertEquals("No winner because output validation failed.", ReportWriter.winnerSummary(100, 80, false));
+    }
+
+    @Test void keepsRatesAndConsumerCountsInSeparateReportScenarios() {
+        String html = new ReportWriter().html(List.of(
+                result("Kafka Streams", 100_000, 1), result("Plain Java", 100_000, 1),
+                result("Kafka Streams", 1_000_000, 3), result("Plain Java", 1_000_000, 3)), List.of());
+
+        assertEquals(2, html.split("Requested input rate:", -1).length - 1);
+        assertTrue(html.contains("100,000 events/s"));
+        assertTrue(html.contains("1,000,000 events/s"));
+        assertTrue(html.contains("1 consumers"));
+        assertTrue(html.contains("3 consumers"));
+    }
+
+    private static BenchmarkResult result(String implementation, long inputRate, int threads) {
+        Latency latency = new Latency(1, 2, 3, 4);
+        return new BenchmarkResult(implementation, "2026-01-01T00:00:00Z",
+                implementation + inputRate + threads, 1, 100_000, 3, 3, 256, threads,
+                inputRate, inputRate, 10, latency, 10, latency, 10, latency,
+                10, 10, latency, new ResourceUsage(1, 2, 3, 4),
+                new Validation(100_000, 100_000, 100_000, 100_000, 100_000, 0, 0, 0),
+                new RuntimeDetails("25", "vendor", "vm", "4.1.0", "G1", 512, "", 0, 0),
+                Map.of());
     }
 }

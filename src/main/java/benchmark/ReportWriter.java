@@ -26,12 +26,18 @@ final class ReportWriter {
 
     String html(List<BenchmarkResult> results, List<SkippedScenario> skipped) {
         StringBuilder scenarios = new StringBuilder();
-        results.stream().map(result -> new Scenario(result.eventCount(), result.requestedPartitions(), result.actualPartitions()))
-                .distinct().sorted(Comparator.comparingInt(Scenario::partitions).thenComparingInt(Scenario::events))
+        results.stream().map(result -> new Scenario(result.eventCount(), result.requestedPartitions(),
+                        result.actualPartitions(), result.processingThreads(), result.requestedInputRate()))
+                .distinct().sorted(Comparator.comparingInt(Scenario::partitions)
+                        .thenComparingInt(Scenario::processingThreads)
+                        .thenComparingLong(Scenario::inputRate)
+                        .thenComparingInt(Scenario::events))
                 .forEach(scenario -> scenarios.append(comparison(scenario, results)));
         StringBuilder skipHtml = new StringBuilder();
         skipped.forEach(skip -> skipHtml.append("<li><strong>").append(number(skip.eventCount())).append(" events, ")
-                .append(skip.requestedPartitions()).append(" requested partitions:</strong> ")
+                .append(skip.requestedPartitions()).append(" requested partitions, ")
+                .append(skip.processingThreads()).append(" consumers, ")
+                .append(rate(skip.requestedInputRate())).append(":</strong> ")
                 .append(escape(skip.reason())).append("</li>"));
         return """
                 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -62,6 +68,7 @@ final class ReportWriter {
         BenchmarkResult plain = Statistics.medianBy(plainRuns, BenchmarkResult::totalThroughput);
         boolean valid = streamsRuns.stream().allMatch(r -> r.validation().valid()) && plainRuns.stream().allMatch(r -> r.validation().valid());
         StringBuilder rows = new StringBuilder();
+        rows.append(neutralRow("Achieved input rate", streams.achievedInputRate(), plain.achievedInputRate(), "/s"));
         rows.append(metricRow("Ingestion throughput", streams.ingestionThroughput(), plain.ingestionThroughput(), true, "/s", valid));
         rows.append(metricRow("Ingestion p50", streams.ingestionLatency().p50Ms(), plain.ingestionLatency().p50Ms(), false, " ms", valid));
         rows.append(metricRow("Ingestion p95", streams.ingestionLatency().p95Ms(), plain.ingestionLatency().p95Ms(), false, " ms", valid));
@@ -83,7 +90,14 @@ final class ReportWriter {
                 streamsRuns.size(), plainRuns.size(), min(streamsRuns), max(streamsRuns), min(plainRuns), max(plainRuns));
         String status = valid ? "<span class=\"valid\">Valid: all expected outputs were observed once.</span>" :
                 "<div class=\"invalid\">Invalid: output validation failed. No winner is highlighted.</div>";
-        return "<section class=\"card\"><h2>" + number(scenario.events()) + " events · " + scenario.actual() + " partitions</h2><p>" + status + "</p><p><strong>Overall result:</strong> " + winnerSummary(streams.totalThroughput(), plain.totalThroughput(), valid) + "</p><p class=\"muted\">" + range + "</p><table><thead><tr><th>Metric</th><th>Kafka Streams</th><th>Plain Java</th></tr></thead><tbody>" + rows + "</tbody></table></section>";
+        return "<section class=\"card\"><h2>" + number(scenario.events()) + " events · "
+                + scenario.actual() + " partitions · " + scenario.processingThreads() + " consumers</h2>"
+                + "<p><strong>Requested input rate:</strong> " + rate(scenario.inputRate()) + "</p><p>"
+                + status + "</p><p><strong>Overall result:</strong> "
+                + winnerSummary(streams.totalThroughput(), plain.totalThroughput(), valid)
+                + "</p><p class=\"muted\">" + range
+                + "</p><table><thead><tr><th>Metric</th><th>Kafka Streams</th><th>Plain Java</th>"
+                + "</tr></thead><tbody>" + rows + "</tbody></table></section>";
     }
 
     static String winnerSummary(double streams, double plain, boolean valid) {
@@ -106,16 +120,24 @@ final class ReportWriter {
                 escape(label), leftClass, left, suffix, rightClass, right, suffix);
     }
 
+    private static String neutralRow(String label, double left, double right, String suffix) {
+        return String.format(Locale.ROOT, "<tr><td>%s</td><td>%,.2f%s</td><td>%,.2f%s</td></tr>",
+                escape(label), left, suffix, right, suffix);
+    }
+
     private static long rounded(double value) { return Math.round(value * 100); }
     private static List<BenchmarkResult> matching(List<BenchmarkResult> all, Scenario scenario, String implementation) {
         return all.stream().filter(r -> r.eventCount() == scenario.events() && r.requestedPartitions() == scenario.partitions()
+                && r.processingThreads() == scenario.processingThreads()
+                && r.requestedInputRate() == scenario.inputRate()
                 && r.implementation().equals(implementation)).toList();
     }
     private static double min(List<BenchmarkResult> values) { return values.stream().mapToDouble(BenchmarkResult::totalThroughput).min().orElse(0); }
     private static double max(List<BenchmarkResult> values) { return values.stream().mapToDouble(BenchmarkResult::totalThroughput).max().orElse(0); }
-    private static String number(int number) { return String.format(Locale.ROOT, "%,d", number); }
+    private static String number(long number) { return String.format(Locale.ROOT, "%,d", number); }
+    private static String rate(long inputRate) { return inputRate == 0 ? "unthrottled" : number(inputRate) + " events/s"; }
     private static String escape(String value) { return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;"); }
 
-    private record Scenario(int events, int partitions, int actual) {}
+    private record Scenario(int events, int partitions, int actual, int processingThreads, long inputRate) {}
     private record Summary(List<BenchmarkResult> results, List<SkippedScenario> skippedScenarios) {}
 }

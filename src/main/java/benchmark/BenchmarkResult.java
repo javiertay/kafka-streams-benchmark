@@ -27,4 +27,5 @@ record BenchmarkResult(
         ResourceUsage resources, Validation validation, RuntimeDetails technicalDetails,
         Map<String, Object> safeConfiguration) {}
 
-record SkippedScenario(int eventCount, int requestedPartitions, int actualPartitions, String reason) {}
+record SkippedScenario(int eventCount, int requestedPartitions, int actualPartitions,
+                       int processingThreads, long requestedInputRate, String reason) {}

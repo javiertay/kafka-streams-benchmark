@@ -10,5 +10,6 @@ WORKDIR /app
 COPY --from=build /src/target/benchmark.jar /app/benchmark.jar
 RUN mkdir -p /app/results
 ENV BENCHMARK_RESULTS_DIR=/app/results
+ENV KAFKA_SECURITY_PROTOCOL=SSL
 EXPOSE 8080
 ENTRYPOINT ["java", "-XX:+UseG1GC", "-jar", "/app/benchmark.jar"]

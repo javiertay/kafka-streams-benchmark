@@ -41,6 +41,9 @@ final class OutputCollector implements AutoCloseable {
             consumer.subscribe(java.util.List.of(topic));
             while (running.get() && consumer.assignment().isEmpty()) consumer.poll(Duration.ofMillis(100));
             consumer.seekToEnd(consumer.assignment());
+            // seekToEnd is lazy; resolving every position prevents the processor from
+            // publishing before the observer has fixed its historical-data boundary.
+            for (var partition : consumer.assignment()) consumer.position(partition);
             ready.countDown();
             while (running.get() && observed.get() < expected) {
                 for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(250))) {

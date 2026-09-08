@@ -8,16 +8,17 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
-import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.streams.StreamsConfig;
 
-import java.time.Duration;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import java.util.concurrent.ExecutionException;
 
 final class KafkaSupport {
     private KafkaSupport() {}
@@ -46,15 +47,23 @@ final class KafkaSupport {
     }
 
     static KafkaProducer<String, String> producer(Config config) {
+        return new KafkaProducer<>(producerProperties(config));
+    }
+
+    static Properties producerProperties(Config config) {
         Properties properties = config.kafkaProperties();
         properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         properties.put(ProducerConfig.ACKS_CONFIG, "all");
         properties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
-        return new KafkaProducer<>(properties);
+        return properties;
     }
 
     static KafkaConsumer<String, String> consumer(Config config, String group) {
+        return new KafkaConsumer<>(consumerProperties(config, group));
+    }
+
+    static Properties consumerProperties(Config config, String group) {
         Properties properties = config.kafkaProperties();
         properties.put(ConsumerConfig.GROUP_ID_CONFIG, group);
         properties.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
@@ -62,7 +71,23 @@ final class KafkaSupport {
         properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
         properties.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 1000);
-        return new KafkaConsumer<>(properties);
+        return properties;
+    }
+
+    static Properties streamsProperties(Config config, String applicationId, String runId, int processingThreads) {
+        Properties properties = config.kafkaProperties();
+        properties.put(StreamsConfig.APPLICATION_ID_CONFIG, applicationId);
+        properties.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.StringSerde.class);
+        properties.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.StringSerde.class);
+        properties.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, processingThreads);
+        properties.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, config.processingGuarantee());
+        properties.put(StreamsConfig.STATE_DIR_CONFIG,
+                Path.of(System.getProperty("java.io.tmpdir"), runId).toString());
+        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        properties.put(StreamsConfig.consumerPrefix(ConsumerConfig.MAX_POLL_RECORDS_CONFIG), 1000);
+        properties.put(StreamsConfig.producerPrefix(ProducerConfig.ACKS_CONFIG), "all");
+        properties.put(StreamsConfig.producerPrefix(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG), true);
+        return properties;
     }
 
     static void prepareGroupAtEnd(Config config, String group, String topic) {
