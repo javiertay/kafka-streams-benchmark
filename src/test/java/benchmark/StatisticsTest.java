@@ -1,0 +1,20 @@
+package benchmark;
+
+import org.junit.jupiter.api.Test;
+import java.util.List;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class StatisticsTest {
+    @Test void calculatesNearestRankPercentiles() {
+        Latency latency = Statistics.latency(List.of(1_000_000L, 2_000_000L, 3_000_000L, 4_000_000L, 100_000_000L));
+        assertEquals(3, latency.p50Ms());
+        assertEquals(100, latency.p95Ms());
+        assertEquals(100, latency.p99Ms());
+        assertEquals(100, latency.maxMs());
+    }
+
+    @Test void calculatesMedianForOddAndEvenSamples() {
+        assertEquals(2, Statistics.median(List.of(1d, 3d, 2d)));
+        assertEquals(2.5, Statistics.median(List.of(1d, 2d, 3d, 4d)));
+    }
+}

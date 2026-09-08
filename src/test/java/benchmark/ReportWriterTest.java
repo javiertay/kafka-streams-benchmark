@@ -1,0 +1,39 @@
+package benchmark;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class ReportWriterTest {
+    @Test void highlightsHigherThroughputAndLowerLatencyCpuAndRam() {
+        assertTrue(ReportWriter.metricRow("throughput", 20, 10, true, "/s", true)
+                .contains("class=\"better\">20.00/s"));
+        assertTrue(ReportWriter.metricRow("latency", 5, 10, false, " ms", true)
+                .contains("class=\"better\">5.00 ms"));
+        assertTrue(ReportWriter.metricRow("CPU", 5, 10, false, "%", true)
+                .contains("class=\"better\">5.00%"));
+        assertTrue(ReportWriter.metricRow("RAM", 5, 10, false, " MB", true)
+                .contains("class=\"better\">5.00 MB"));
+    }
+
+    @Test void tiesAndInvalidRunsHaveNoWinner() {
+        assertFalse(ReportWriter.metricRow("tie", 1.001, 1.004, true, "", true).contains("better"));
+        assertFalse(ReportWriter.metricRow("invalid", 20, 10, true, "", false).contains("better"));
+    }
+
+    @Test void generatedHtmlExplainsWhatIsMeasuredAndWhy() {
+        String html = new ReportWriter().html(List.of(), List.of());
+        assertTrue(html.contains("What performance are we testing?"));
+        assertTrue(html.contains("Why are we doing this?"));
+        assertTrue(html.contains("KafkaConsumer"));
+    }
+
+    @Test void summaryNamesWinnerDifferenceTieAndInvalidRun() {
+        assertEquals("Kafka Streams had 25.0% higher total throughput.", ReportWriter.winnerSummary(100, 80, true));
+        assertEquals("Plain Java had 25.0% higher total throughput.", ReportWriter.winnerSummary(80, 100, true));
+        assertEquals("Tie at the displayed precision.", ReportWriter.winnerSummary(1.001, 1.004, true));
+        assertEquals("No winner because output validation failed.", ReportWriter.winnerSummary(100, 80, false));
+    }
+}
