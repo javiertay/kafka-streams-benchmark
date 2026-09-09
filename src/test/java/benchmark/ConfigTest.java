@@ -20,15 +20,17 @@ class ConfigTest {
         env.put("KAFKA_BOOTSTRAP_SERVERS", "kafka:9093");
         env.put("KAFKA_TRUSTSTORE_LOCATION", truststore.toString());
         env.put("KAFKA_TRUSTSTORE_PASSWORD", "secret");
-        env.put("BENCHMARK_EVENT_COUNTS", "10, 20");
         env.put("BENCHMARK_PARTITIONS", "1,3");
-        env.put("BENCHMARK_PROCESSING_THREADS", "1,3,6");
+        env.put("BENCHMARK_SERVICE_INSTANCES", "1,3,6");
         env.put("BENCHMARK_INPUT_RATES", "100000,1000000");
+        env.put("BENCHMARK_MEASUREMENT_SECONDS", "10");
+        env.put("BENCHMARK_WORKER_URLS", "http://worker-1:8080, http://worker-2:8080");
         env.put("KAFKA_PROPERTY_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM", "https");
         Config config = Config.from(env);
-        assertEquals(java.util.List.of(10, 20), config.eventCounts());
-        assertEquals(java.util.List.of(1, 3, 6), config.processingThreads());
+        assertEquals(java.util.List.of(1, 3, 6), config.serviceInstances());
         assertEquals(java.util.List.of(100_000L, 1_000_000L), config.inputRates());
+        assertEquals(10, config.measurementSeconds());
+        assertEquals(java.util.List.of("http://worker-1:8080", "http://worker-2:8080"), config.workerUrls());
         assertEquals("SSL", config.securityProtocol());
         assertEquals("SSL", config.kafkaProperties().get("security.protocol"));
         assertEquals("https", config.extraKafkaProperties().get("ssl.endpoint.identification.algorithm"));
@@ -48,7 +50,7 @@ class ConfigTest {
                 "KAFKA_BOOTSTRAP_SERVERS", "kafka:9093",
                 "KAFKA_TRUSTSTORE_LOCATION", truststore.toString(),
                 "KAFKA_TRUSTSTORE_PASSWORD", "secret",
-                "BENCHMARK_PROCESSING_THREADS", "3"));
+                "BENCHMARK_SERVICE_INSTANCES", "3"));
 
         var producer = KafkaSupport.producerProperties(config);
         assertEquals("all", producer.get(ProducerConfig.ACKS_CONFIG));
@@ -59,9 +61,9 @@ class ConfigTest {
         assertEquals(false, consumer.get(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG));
         assertEquals(1000, consumer.get(ConsumerConfig.MAX_POLL_RECORDS_CONFIG));
 
-        var streams = KafkaSupport.streamsProperties(config, "streams-run", "run-id", 3);
+        var streams = KafkaSupport.streamsProperties(config, "streams-run", "run-id", 1);
         assertEquals("streams-run", streams.get(StreamsConfig.APPLICATION_ID_CONFIG));
-        assertEquals(3, streams.get(StreamsConfig.NUM_STREAM_THREADS_CONFIG));
+        assertEquals(1, streams.get(StreamsConfig.NUM_STREAM_THREADS_CONFIG));
         assertEquals("at_least_once", streams.get(StreamsConfig.PROCESSING_GUARANTEE_CONFIG));
         assertEquals(1000, streams.get(StreamsConfig.consumerPrefix(ConsumerConfig.MAX_POLL_RECORDS_CONFIG)));
         assertEquals("all", streams.get(StreamsConfig.producerPrefix(ProducerConfig.ACKS_CONFIG)));
@@ -88,11 +90,15 @@ class ConfigTest {
                 "KAFKA_SECURITY_PROTOCOL", "HTTP")));
     }
 
-    @Test void singularInputRateRemainsAValidOneRateScenario() {
-        Config config = Config.from(Map.of(
+    @Test void rejectsNonPositiveRatesAndOversizedDuration() {
+        assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
                 "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
                 "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
-                "BENCHMARK_INPUT_RATE", "25000"));
-        assertEquals(java.util.List.of(25_000L), config.inputRates());
+                "BENCHMARK_INPUT_RATES", "0")));
+        assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
+                "BENCHMARK_INPUT_RATES", "1000000000",
+                "BENCHMARK_MEASUREMENT_SECONDS", "3")));
     }
 }

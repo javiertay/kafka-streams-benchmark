@@ -10,48 +10,58 @@ import java.util.concurrent.atomic.AtomicReference;
 final class RunSupport {
     private RunSupport() {}
 
-    static Generation generate(Config config, String runId, int eventCount, long inputRate, long seed) throws Exception {
+    static Generation generate(Config config, String runId, int durationSeconds, long inputRate, long seed,
+                               java.util.function.IntSupplier observed) throws Exception {
         long started = System.nanoTime();
-        long interval = inputRate == 0 ? 0 : 1_000_000_000L / inputRate;
+        long deadline = started + durationSeconds * 1_000_000_000L;
+        long interval = 1_000_000_000L / inputRate;
         AtomicReference<Exception> failure = new AtomicReference<>();
+        int sequence = 0;
         try (var producer = KafkaSupport.producer(config)) {
-            for (int sequence = 0; sequence < eventCount; sequence++) {
-                if (interval > 0) {
-                    long target = started + sequence * interval;
-                    long remaining;
-                    while ((remaining = target - System.nanoTime()) > 0) {
-                        if (remaining > 1_000_000) Thread.sleep(Math.min(remaining / 1_000_000, 10));
-                        else Thread.onSpinWait();
-                    }
+            while (System.nanoTime() < deadline) {
+                long target = started + sequence * interval;
+                long remaining;
+                while ((remaining = target - System.nanoTime()) > 0) {
+                    if (remaining > 1_000_000) Thread.sleep(Math.min(remaining / 1_000_000, 10));
+                    else Thread.onSpinWait();
                 }
                 long now = System.currentTimeMillis();
                 InputEvent event = Workload.event(runId, sequence, config.payloadBytes(), config.uniqueKeys(), seed, now);
                 producer.send(new ProducerRecord<>(config.inputTopic(), null, now, event.key(), EventCodec.write(event)),
                         (metadata, error) -> { if (error != null) failure.compareAndSet(null, error); });
+                sequence++;
             }
+            int observedAtWindowEnd = observed.getAsInt();
+            long windowEnded = System.nanoTime();
             producer.flush();
+            long finished = System.nanoTime();
+            if (failure.get() != null) throw failure.get();
+            double windowSeconds = (windowEnded - started) / 1_000_000_000.0;
+            return new Generation(sequence, windowSeconds == 0 ? 0 : sequence / windowSeconds,
+                    started, windowEnded, finished, observedAtWindowEnd,
+                    (finished - windowEnded) / 1_000_000_000.0);
         }
-        if (failure.get() != null) throw failure.get();
-        double seconds = (System.nanoTime() - started) / 1_000_000_000.0;
-        return new Generation(eventCount, seconds == 0 ? 0 : eventCount / seconds);
     }
 
     static BenchmarkResult result(Config config, String implementation, String runId, int iteration,
-                                  int eventCount, int requestedPartitions, int actualPartitions,
-                                  int processingThreads, long inputRate, Generation generation,
-                                  StageMetrics metrics, long finishedNanos,
-                                  ResourceUsage resources, Validation validation, long gcCountBefore, long gcTimeBefore) {
-        double elapsed = (finishedNanos - metrics.startedNanos) / 1_000_000_000.0;
+                                  int measurementSeconds, int requestedPartitions, int actualPartitions,
+                                  int serviceInstances, java.util.List<Integer> eventsConsumedPerService,
+                                  long inputRate, Generation generation, int backlogAtGenerationEnd,
+                                  StageMetrics metrics, long finishedNanos, ResourceUsage resources,
+                                  Validation validation, long gcCount, long gcTime) {
+        double elapsed = (finishedNanos - generation.startedNanos()) / 1_000_000_000.0;
+        double catchUpSeconds = Math.max(0, (finishedNanos - generation.windowEndedNanos()) / 1_000_000_000.0);
         var runtime = ManagementFactory.getRuntimeMXBean();
         String gc = ManagementFactory.getGarbageCollectorMXBeans().stream().map(bean -> bean.getName()).sorted()
                 .reduce((a, b) -> a + ", " + b).orElse("unknown");
         RuntimeDetails details = new RuntimeDetails(System.getProperty("java.version"), System.getProperty("java.vendor"),
                 System.getProperty("java.vm.name"), AppInfoParser.getVersion(), gc,
-                Runtime.getRuntime().maxMemory() / 1024 / 1024, String.join(" ", runtime.getInputArguments()),
-                Math.max(0, ResourceSampler.gcCount() - gcCountBefore), Math.max(0, ResourceSampler.gcTime() - gcTimeBefore));
-        return new BenchmarkResult(implementation, java.time.Instant.now().toString(), runId, iteration, eventCount,
-                requestedPartitions, actualPartitions, config.payloadBytes(), processingThreads, inputRate,
-                generation.achievedRate(),
+                Runtime.getRuntime().maxMemory() / 1024 / 1024 * serviceInstances,
+                String.join(" ", runtime.getInputArguments()), gcCount, gcTime);
+        return new BenchmarkResult(implementation, java.time.Instant.now().toString(), runId, iteration, generation.sent(),
+                measurementSeconds, requestedPartitions, actualPartitions, config.payloadBytes(), serviceInstances,
+                eventsConsumedPerService, inputRate, generation.achievedRate(), generation.producerFlushSeconds(),
+                backlogAtGenerationEnd, catchUpSeconds,
                 metrics.throughput(metrics.firstIngestNanos, metrics.lastIngestNanos, validation.consumed()),
                 Statistics.latency(metrics.ingestion),
                 metrics.throughput(metrics.firstProcessNanos, metrics.lastProcessNanos, validation.consumed()),
@@ -66,4 +76,5 @@ final class RunSupport {
     }
 }
 
-record Generation(int sent, double achievedRate) {}
+record Generation(int sent, double achievedRate, long startedNanos, long windowEndedNanos, long finishedNanos,
+                  int observedAtWindowEnd, double producerFlushSeconds) {}

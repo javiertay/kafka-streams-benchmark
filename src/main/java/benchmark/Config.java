@@ -12,11 +12,11 @@ import java.util.Set;
 
 record Config(
         String bootstrapServers, String securityProtocol, Path truststore, String truststorePassword,
-        String inputTopic, String outputTopic, List<Integer> eventCounts,
-        List<Integer> partitions, int payloadBytes, int uniqueKeys, List<Integer> processingThreads,
-        int warmupEvents, int iterations, List<Long> inputRates, int replicationFactor,
+        String inputTopic, String outputTopic, List<Integer> partitions,
+        int payloadBytes, int uniqueKeys, List<Integer> serviceInstances,
+        int warmupSeconds, int measurementSeconds, int iterations, List<Long> inputRates, int replicationFactor,
         int httpPort, Path resultsDir, int timeoutSeconds, String processingGuarantee,
-        Map<String, String> extraKafkaProperties) {
+        List<String> workerUrls, Map<String, String> extraKafkaProperties) {
 
     static Config from(Map<String, String> env) {
         String bootstrap = required(env, "KAFKA_BOOTSTRAP_SERVERS");
@@ -28,13 +28,22 @@ record Config(
         boolean usesSsl = securityProtocol.endsWith("SSL");
         Path truststore = usesSsl ? Path.of(required(env, "KAFKA_TRUSTSTORE_LOCATION")) : null;
         String password = usesSsl ? required(env, "KAFKA_TRUSTSTORE_PASSWORD") : null;
-        var eventCounts = positiveList(env.getOrDefault("BENCHMARK_EVENT_COUNTS", "10000,100000,1000000"), "BENCHMARK_EVENT_COUNTS");
         var partitions = positiveList(env.getOrDefault("BENCHMARK_PARTITIONS", "1,3,6,12"), "BENCHMARK_PARTITIONS");
-        var processingThreads = positiveList(env.getOrDefault("BENCHMARK_PROCESSING_THREADS", "1"),
-                "BENCHMARK_PROCESSING_THREADS");
-        String configuredRates = env.getOrDefault("BENCHMARK_INPUT_RATES",
-                env.getOrDefault("BENCHMARK_INPUT_RATE", "0"));
-        var inputRates = nonNegativeLongList(configuredRates, "BENCHMARK_INPUT_RATES");
+        var serviceInstances = positiveList(env.getOrDefault("BENCHMARK_SERVICE_INSTANCES", "1"),
+                "BENCHMARK_SERVICE_INSTANCES");
+        var inputRates = positiveLongList(env.getOrDefault("BENCHMARK_INPUT_RATES", "100000,1000000"),
+                "BENCHMARK_INPUT_RATES");
+        int measurementSeconds = positiveInt(env, "BENCHMARK_MEASUREMENT_SECONDS", 30);
+        int warmupSeconds = nonNegativeInt(env, "BENCHMARK_WARMUP_SECONDS", 2);
+        for (long rate : inputRates) {
+            long maximumEvents;
+            try { maximumEvents = Math.multiplyExact(rate, Math.max(measurementSeconds, warmupSeconds)); }
+            catch (ArithmeticException overflow) {
+                throw new IllegalArgumentException("input rate × duration is too large", overflow);
+            }
+            if (maximumEvents > Integer.MAX_VALUE)
+                throw new IllegalArgumentException("input rate × duration must not exceed 2,147,483,647 events");
+        }
         for (int i = 1; i < partitions.size(); i++) {
             if (partitions.get(i) <= partitions.get(i - 1)) {
                 throw new IllegalArgumentException("BENCHMARK_PARTITIONS must be strictly ascending");
@@ -49,18 +58,21 @@ record Config(
         Config config = new Config(bootstrap, securityProtocol, truststore, password,
                 env.getOrDefault("BENCHMARK_INPUT_TOPIC", "benchmark-input"),
                 env.getOrDefault("BENCHMARK_OUTPUT_TOPIC", "benchmark-output"),
-                eventCounts, partitions,
+                partitions,
                 positiveInt(env, "BENCHMARK_PAYLOAD_BYTES", 1024),
                 positiveInt(env, "BENCHMARK_UNIQUE_KEYS", 1000),
-                processingThreads,
-                nonNegativeInt(env, "BENCHMARK_WARMUP_EVENTS", 1000),
+                serviceInstances,
+                warmupSeconds,
+                measurementSeconds,
                 positiveInt(env, "BENCHMARK_ITERATIONS", 3),
                 inputRates,
                 positiveInt(env, "BENCHMARK_REPLICATION_FACTOR", 1),
                 positiveInt(env, "BENCHMARK_HTTP_PORT", 8080),
                 Path.of(env.getOrDefault("BENCHMARK_RESULTS_DIR", "results")),
                 positiveInt(env, "BENCHMARK_TIMEOUT_SECONDS", 600),
-                env.getOrDefault("KAFKA_STREAMS_PROCESSING_GUARANTEE", "at_least_once"), extras);
+                env.getOrDefault("KAFKA_STREAMS_PROCESSING_GUARANTEE", "at_least_once"),
+                Arrays.stream(env.getOrDefault("BENCHMARK_WORKER_URLS", "").split(","))
+                        .map(String::trim).filter(value -> !value.isEmpty()).toList(), extras);
         if (usesSsl && !Files.isRegularFile(config.truststore())) {
             throw new IllegalArgumentException("KAFKA_TRUSTSTORE_LOCATION is not a readable file: " + config.truststore());
         }
@@ -88,8 +100,9 @@ record Config(
         safe.put("outputTopic", outputTopic);
         safe.put("payloadBytes", payloadBytes);
         safe.put("uniqueKeys", uniqueKeys);
-        safe.put("processingThreadScenarios", processingThreads);
+        safe.put("serviceInstanceScenarios", serviceInstances);
         safe.put("inputRateScenarios", inputRates);
+        safe.put("measurementSeconds", measurementSeconds);
         return safe;
     }
 
@@ -121,13 +134,13 @@ record Config(
         return value;
     }
 
-    private static List<Long> nonNegativeLongList(String value, String name) {
+    private static List<Long> positiveLongList(String value, String name) {
         try {
             List<Long> result = Arrays.stream(value.split(",")).map(String::trim).map(Long::parseLong).toList();
-            if (result.isEmpty() || result.stream().anyMatch(number -> number < 0)) throw new NumberFormatException();
+            if (result.isEmpty() || result.stream().anyMatch(number -> number <= 0)) throw new NumberFormatException();
             return result;
         } catch (NumberFormatException exception) {
-            throw new IllegalArgumentException(name + " must be a comma-separated list of non-negative integers", exception);
+            throw new IllegalArgumentException(name + " must be a comma-separated list of positive integers", exception);
         }
     }
 }

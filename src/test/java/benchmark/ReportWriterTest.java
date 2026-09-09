@@ -28,6 +28,7 @@ class ReportWriterTest {
         String html = new ReportWriter().html(List.of(), List.of());
         assertTrue(html.contains("What performance are we testing?"));
         assertTrue(html.contains("Why are we doing this?"));
+        assertTrue(html.contains("Overall summary"));
         assertTrue(html.contains("KafkaConsumer"));
     }
 
@@ -38,6 +39,22 @@ class ReportWriterTest {
         assertEquals("No winner because output validation failed.", ReportWriter.winnerSummary(100, 80, false));
     }
 
+    @Test void overallSummaryCountsConfigurationWinsAndExcludesInvalidComparisons() {
+        List<BenchmarkResult> results = List.of(
+                result("Kafka Streams", 100_000, 1, 120, true),
+                result("Plain Java", 100_000, 1, 100, true),
+                result("Kafka Streams", 1_000_000, 3, 110, true),
+                result("Plain Java", 1_000_000, 3, 100, true),
+                result("Kafka Streams", 100_000, 6, 90, true),
+                result("Plain Java", 100_000, 6, 110, true),
+                result("Kafka Streams", 1_000_000, 6, 90, false),
+                result("Plain Java", 1_000_000, 6, 110, true));
+
+        assertEquals("Kafka Streams did better overall: 2 configuration wins versus 1 for Plain Java, "
+                        + "with 0 ties. 1 invalid comparison excluded.",
+                ReportWriter.overallSummary(results));
+    }
+
     @Test void keepsRatesAndConsumerCountsInSeparateReportScenarios() {
         String html = new ReportWriter().html(List.of(
                 result("Kafka Streams", 100_000, 1), result("Plain Java", 100_000, 1),
@@ -46,17 +63,27 @@ class ReportWriterTest {
         assertEquals(2, html.split("Requested input rate:", -1).length - 1);
         assertTrue(html.contains("100,000 events/s"));
         assertTrue(html.contains("1,000,000 events/s"));
-        assertTrue(html.contains("1 consumers"));
-        assertTrue(html.contains("3 consumers"));
+        assertTrue(html.contains("1 service"));
+        assertTrue(html.contains("3 services"));
+        assertEquals(2, html.split("role=\"tab\"", -1).length - 1);
+        assertTrue(html.contains("Backlog at generation end"));
+        assertTrue(html.contains("Catch-up time"));
     }
 
-    private static BenchmarkResult result(String implementation, long inputRate, int threads) {
+    private static BenchmarkResult result(String implementation, long inputRate, int services) {
+        return result(implementation, inputRate, services, 10, true);
+    }
+
+    private static BenchmarkResult result(String implementation, long inputRate, int services,
+                                          double totalThroughput, boolean valid) {
         Latency latency = new Latency(1, 2, 3, 4);
         return new BenchmarkResult(implementation, "2026-01-01T00:00:00Z",
-                implementation + inputRate + threads, 1, 100_000, 3, 3, 256, threads,
-                inputRate, inputRate, 10, latency, 10, latency, 10, latency,
-                10, 10, latency, new ResourceUsage(1, 2, 3, 4),
-                new Validation(100_000, 100_000, 100_000, 100_000, 100_000, 0, 0, 0),
+                implementation + inputRate + services, 1, 100_000, 10, 3, 3, 256, services,
+                java.util.Collections.nCopies(services, 100_000 / services), inputRate, inputRate, 0, 0, 0,
+                10, latency, 10, latency, 10, latency,
+                10, totalThroughput, latency, new ResourceUsage(1, 2, 3, 4),
+                new Validation(100_000, 100_000, 100_000, 100_000, valid ? 100_000 : 99_999,
+                        valid ? 0 : 1, 0, 0),
                 new RuntimeDetails("25", "vendor", "vm", "4.1.0", "G1", 512, "", 0, 0),
                 Map.of());
     }

@@ -1,3 +1,14 @@
+x-worker: &worker
+  image: kafka-streams-benchmark:local
+  pull_policy: never
+  depends_on:
+    kafka:
+      condition: service_healthy
+  environment:
+    KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+    KAFKA_SECURITY_PROTOCOL: PLAINTEXT
+    BENCHMARK_WORKER_MODE: "true"
+
 services:
   kafka:
     image: apache/kafka:4.1.0
@@ -30,6 +41,7 @@ services:
 
   benchmark:
     build: .
+    image: kafka-streams-benchmark:local
     ports:
       - "8080:8080"
     depends_on:
@@ -38,12 +50,31 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
       KAFKA_SECURITY_PROTOCOL: PLAINTEXT
-      BENCHMARK_EVENT_COUNTS: "100000"
       BENCHMARK_INPUT_RATES: 100000,1000000
+      BENCHMARK_MEASUREMENT_SECONDS: "10"
       BENCHMARK_PARTITIONS: 1,3,6
       BENCHMARK_PAYLOAD_BYTES: "256"
-      BENCHMARK_PROCESSING_THREADS: 1,3,6
-      BENCHMARK_WARMUP_EVENTS: "10000"
+      BENCHMARK_SERVICE_INSTANCES: 1,3,6
+      BENCHMARK_WORKER_URLS: http://benchmark-worker-1:8080,http://benchmark-worker-2:8080,http://benchmark-worker-3:8080,http://benchmark-worker-4:8080,http://benchmark-worker-5:8080,http://benchmark-worker-6:8080
+      BENCHMARK_WARMUP_SECONDS: "1"
       BENCHMARK_ITERATIONS: "1"
       BENCHMARK_REPLICATION_FACTOR: "1"
       BENCHMARK_TIMEOUT_SECONDS: "300"
+
+  benchmark-worker-1:
+    <<: *worker
+
+  benchmark-worker-2:
+    <<: *worker
+
+  benchmark-worker-3:
+    <<: *worker
+
+  benchmark-worker-4:
+    <<: *worker
+
+  benchmark-worker-5:
+    <<: *worker
+
+  benchmark-worker-6:
+    <<: *worker

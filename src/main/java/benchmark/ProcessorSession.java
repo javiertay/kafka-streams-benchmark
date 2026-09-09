@@ -1,0 +1,32 @@
+package benchmark;
+
+import java.util.List;
+
+interface ProcessorSession {
+    ProcessorReport stop() throws Exception;
+
+    static ProcessorSession start(Config config, WorkerCommand command) throws Exception {
+        StageMetrics metrics = new StageMetrics(command.estimatedEvents());
+        return switch (command.implementation()) {
+            case "Kafka Streams" -> new KafkaStreamsProcessor(config, command, metrics);
+            case "Plain Java" -> new TraditionalKafkaProcessor(config, command, metrics);
+            default -> throw new IllegalArgumentException("Unknown implementation: " + command.implementation());
+        };
+    }
+}
+
+record WorkerCommand(String implementation, String runId, String groupId, long estimatedEvents) {}
+
+record ProcessorReport(int consumed, int published, MetricsSnapshot metrics, ResourceUsage resources,
+                       long gcCount, long gcTimeMs) {
+    static ProcessorReport combine(List<ProcessorReport> reports) {
+        return new ProcessorReport(reports.stream().mapToInt(ProcessorReport::consumed).sum(),
+                reports.stream().mapToInt(ProcessorReport::published).sum(), null,
+                new ResourceUsage(reports.stream().mapToDouble(r -> r.resources().averageCpuPercent()).sum(),
+                        reports.stream().mapToDouble(r -> r.resources().peakCpuPercent()).sum(),
+                        reports.stream().mapToDouble(r -> r.resources().averageRamMb()).sum(),
+                        reports.stream().mapToDouble(r -> r.resources().peakRamMb()).sum()),
+                reports.stream().mapToLong(ProcessorReport::gcCount).sum(),
+                reports.stream().mapToLong(ProcessorReport::gcTimeMs).sum());
+    }
+}

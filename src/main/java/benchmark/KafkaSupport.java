@@ -101,4 +101,16 @@ final class KafkaSupport {
             consumer.commitSync(offsets);
         }
     }
+
+    static void awaitGroupMembers(Config config, String group, int expected) throws Exception {
+        long deadline = System.nanoTime() + config.timeoutSeconds() * 1_000_000_000L;
+        try (AdminClient admin = AdminClient.create(config.kafkaProperties())) {
+            while (System.nanoTime() < deadline) {
+                var description = admin.describeConsumerGroups(List.of(group)).all().get().get(group);
+                if (description != null && description.members().size() == expected) return;
+                Thread.sleep(250);
+            }
+        }
+        throw new IllegalStateException("Kafka group " + group + " did not reach " + expected + " service members");
+    }
 }

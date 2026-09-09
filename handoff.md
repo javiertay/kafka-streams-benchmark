@@ -1,47 +1,54 @@
 # Current objective
 
-Deliver a standalone Maven/Java 25 project that benchmarks Kafka Streams against plain `KafkaConsumer`/`KafkaProducer` processing in one Docker image and serves an understandable static HTML report.
+Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with plain Kafka consumers under sustained 100k and 1m events/second offered load, partition variations, and horizontal processor-service scaling.
 
 # Completed work
 
-- Implemented SSL configuration, retained two-topic creation/growth, ascending partition handling, deterministic JSON workloads, unique run isolation, warm-ups, iterations, and optional fixed input rate.
-- Implemented sequential Kafka Streams and plain Java runners using the same codec, transformation, topics, acknowledgements, concurrency, observer, validation, and metrics.
-- Added CPU/RAM and JVM/GC details, JSON persistence, a plain-English static report, winner/tie/invalid rules, and a JDK HTTP server.
-- Added a Java 25 multi-stage Maven Docker build, tests, and setup documentation.
-- Centralized Kafka Streams, consumer, and producer property construction in `KafkaSupport`; split both runners into named topology/worker/processing methods.
-- Documented the exact Kafka Streams and conventional client configuration, offset isolation, threading, publishing, and observation flows in `README.md`.
-- Added `KAFKA_SECURITY_PROTOCOL` with validated support for `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, and `SASL_SSL`; truststore settings are required only by SSL protocols.
-- Added `compose.yaml` for a two-service local load test: a single-node Kafka 4.1.0 KRaft plaintext broker and the benchmark configured with a rate/partition/consumer matrix.
-- Fixed the output-observer startup race found by the first Compose run by resolving lazy `seekToEnd` positions before allowing processing to start.
-- Extended the benchmark to a rate × partition × consumer-count matrix. Local Compose requests 100k and 1m events/s across 1/3/6 partitions and 1/3/6 consumers using 100k-event runs.
-- Fixed fixed-rate semantics so the workload generator runs concurrently with active consumers instead of preloading the topic before measurement.
+- Replaced the fixed-event-count × input-rate cross-product with fixed-duration offered-load scenarios.
+- The generator now runs for `BENCHMARK_MEASUREMENT_SECONDS`; actual generated events and achieved input rate are measured rather than forcing a preset count.
+- Added backlog-at-generation-end and catch-up-time results so the report shows whether processors sustained the offered load.
+- Separated coordinator work (generation, observation, reporting) from processor resources.
+- Added six Compose worker services. Each active worker is a separate JVM/container with one Kafka Streams instance/stream thread or one conventional consumer/producer pair.
+- Workers share the run-specific Streams application ID or plain consumer group, and the coordinator waits for the requested Kafka group membership before generating load.
+- Aggregated worker counters, latency samples, CPU, RAM, and GC data; recorded per-service consumption distribution.
+- Bounded each stage to 100,000 evenly spaced latency samples for large sustained runs.
+- Added tabbed HTML configuration navigation and documented how to interpret achieved load, backlog, and catch-up.
+- Added concise coordinator and worker lifecycle logs for matrix/scenario progress, group readiness, generation, backlog drain, worker shutdown, report writes, validation, failures, and unambiguous final completion.
+- Fixed multi-service startup: workers now start concurrently, startup uses `BENCHMARK_TIMEOUT_SECONDS`, repeated start requests for the same run are idempotent, and partial startup failures clean up workers that already started.
+- Fixed conventional consumers with more services than partitions: a worker is ready after its first successful group poll, even when Kafka correctly assigns it no partition.
+- Added an HTML overall summary that declares whether Kafka Streams or plain Java did better by counting valid configuration wins using median total throughput; ties and excluded invalid comparisons are shown explicitly.
+- Reduced the partition/service matrix to meaningful combinations only: service counts greater than requested partitions are omitted, leaving `1/1`, `3/1`, `3/3`, `6/1`, `6/3`, and `6/6` for the Compose defaults.
+- Split the two worker implementations into presentation-friendly `KafkaStreamsProcessor.java` and `TraditionalKafkaProcessor.java` files. Removed the empty `StreamsRunner`/`PlainRunner` subclasses and kept orchestration in the shared `DistributedRunner`.
 
 # Files changed
 
-- Build/container: `pom.xml`, `Dockerfile`, `compose.yaml`, `.dockerignore`, `.gitignore`
-- Application and tests: `src/main/java/benchmark/*.java`, `src/test/java/benchmark/*.java`
-- Documentation: `README.md`, `handoff.md`
+- Runtime/configuration: `compose.yaml`, `src/main/java/benchmark/Config.java`, `BenchmarkOrchestrator.java`, `Main.java`
+- Distributed processing: `DistributedRunner.java`, `DistributedWorkers.java`, `ProcessorSession.java`, `WorkerServer.java`, `KafkaStreamsProcessor.java`, `TraditionalKafkaProcessor.java`, `KafkaSupport.java`
+- Measurement/reporting: `RunSupport.java`, `OutputCollector.java`, `Statistics.java`, `BenchmarkResult.java`, `ReportWriter.java`
+- Tests/docs: `ConfigTest.java`, `StatisticsTest.java`, `ReportWriterTest.java`, `README.md`, `handoff.md`
 
 # Commands run and results
 
-- `java -version` — passed; Oracle Java 25.0.4.
-- Apache Maven 3.9.11 `mvn -B verify` — passed after the matrix changes; 15 production sources compiled, 18 tests passed, and `target/benchmark.jar` was produced.
-- `java -jar target/benchmark.jar` without environment — passed expected validation; exited 2 for missing `KAFKA_BOOTSTRAP_SERVERS`.
-- `docker-compose -f compose.yaml config --quiet` — passed; the two-service Compose model resolved successfully.
-- `docker-compose -f compose.yaml up --build -d` — passed; built the Java 25 image, ran all 18 tests in the image build, started Kafka healthy, and completed the expanded plaintext matrix.
-- Expanded local load results — 36 measured implementation results across 18 matched scenarios, with zero invalid or skipped runs and zero missing, duplicate, or unexpected outputs. At a requested 100k events/s, achieved rates ranged from about 54k to 100k events/s; at a requested 1m events/s, achieved rates ranged from about 157k to 383k events/s. `http://localhost:8080` returned HTTP 200 with the generated report.
-- `docker-compose -f compose.yaml down` — passed; removed the temporary containers and network.
+- Final Dockerized Maven `mvn -B verify` after separating the processor implementations — passed with 19 production sources and 21 tests.
+- `docker-compose -f compose.yaml config --quiet` — passed for the eight-service Compose model.
+- Final distributed Compose smoke test using a fresh plaintext broker, 1-second load at 10k events/s, 3 partitions, and 1/3 services — passed with 4 valid results and zero missing/duplicate/unexpected outputs.
+- Final smoke distributions: Kafka Streams 3-service run consumed 3240/3361/3400; plain Java consumed 3400/3360/3239.
+- Final smoke achieved about 10k events/s in every run. Window-boundary backlog/catch-up examples were 976/0.14s for one Kafka Streams service, 57/0.01s for one plain service, 3501/2.46s for three Streams services, and 326/0.03s for three plain services.
+- Smoke report returned HTTP 200 with two configuration tabs, two panels, producer-flush time, backlog, and catch-up metrics.
+- Lifecycle-log smoke test using an isolated plaintext stack, 1 second at 1k events/s, 1 partition, and 1 service — passed for both implementations with 1,001/1,001 outputs observed. Coordinator logs reached `[benchmark] COMPLETED` and `[server] READY: benchmark complete`; worker logs reached `STOPPED` for both runs; the report returned HTTP 200.
+- Worker-start regression smoke using 1 partition and 6 separate services — passed for both implementations with all six workers ready, 1,001/1,001 outputs observed, and five idle services per run as expected. This directly covers the former worker readiness timeout when service count exceeded partition count.
+- Post-refactor Compose smoke using 1 partition, 1 service, and a 1-second 1k events/s window — passed for both implementations with 1,001/1,001 outputs validated and a completed report.
+- Temporary smoke override, containers, and network were removed.
 
 # Known issues / unverified
 
-- The local plaintext flow is verified, including topic creation, partition increases through 1/3/6, 1/3/6 consumer instances for both implementations, validation, JSON/HTML generation, and HTTP serving.
-- No SSL Kafka cluster was supplied, so the external SSL flow remains integration-unverified.
-- Publishing latency is comparable publish-to-observe latency, not broker acknowledgement latency; Kafka Streams has no per-record producer callback.
-- Fixed-rate results persist requested and achieved input rate but do not currently report consumer lag.
-- Consumer instances are concurrent stream threads or `KafkaConsumer` workers in one benchmark JVM; separate JVM/container replicas are not orchestrated.
+- The complete default 10-second × 100k/1m rates × 1/3/6 partitions × 1/3/6 services matrix has not been run; only the focused distributed smoke matrix is integration-verified.
+- A run where achieved input rate is below the target does not prove consumer capacity at that target; it identifies the generator, broker, or network as the limiting path.
+- No SSL Kafka cluster was supplied, so SSL integration remains unverified.
+- Fixed-rate results do not yet include Kafka committed-offset lag; backlog is measured from generated versus observed run events.
 
 # Next recommended steps
 
-1. Run an SSL-cluster smoke test before increasing the external-cluster matrix.
-2. Use at least one million events per run when evaluating whether one million events/s can be sustained rather than briefly attempted.
-3. Add consumer-lag collection if fixed-rate tests require it.
+1. Run the default local matrix when its several-minute runtime and broker disk usage are acceptable.
+2. Use a 30–60 second measurement window on representative infrastructure for decision-grade results.
+3. Add committed-offset lag only if broker-level lag behavior is required beyond the current end-to-end backlog measurement.

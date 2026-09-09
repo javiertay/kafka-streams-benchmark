@@ -22,21 +22,32 @@ public final class Main {
             return;
         }
         Files.createDirectories(config.resultsDir());
+        if (Boolean.parseBoolean(System.getenv().getOrDefault("BENCHMARK_WORKER_MODE", "false"))) {
+            WorkerServer.serve(config);
+            return;
+        }
+        boolean succeeded = false;
         try {
+            System.out.println("[benchmark] Coordinator starting");
             new BenchmarkOrchestrator().run(config);
+            succeeded = true;
+            System.out.println("[benchmark] All benchmark work finished successfully");
         } catch (Exception exception) {
+            System.err.println("[benchmark] FAILED: " + (exception.getMessage() == null
+                    ? exception.getClass().getSimpleName() : exception.getMessage()));
             exception.printStackTrace(System.err);
             writeFailure(config.resultsDir(), exception);
         }
-        serve(config.resultsDir(), config.httpPort());
+        serve(config.resultsDir(), config.httpPort(), succeeded);
     }
 
-    private static void serve(Path directory, int port) throws IOException {
+    private static void serve(Path directory, int port, boolean benchmarkSucceeded) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/", exchange -> respond(exchange, directory));
         server.setExecutor(java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor());
         server.start();
-        System.out.println("Results available at http://localhost:" + port);
+        System.out.printf("[server] READY: benchmark %s; results available at http://localhost:%d%n",
+                benchmarkSucceeded ? "complete" : "failed", port);
     }
 
     private static void respond(HttpExchange exchange, Path directory) throws IOException {

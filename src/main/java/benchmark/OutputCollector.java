@@ -12,7 +12,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 final class OutputCollector implements AutoCloseable {
     private final KafkaConsumer<String, String> consumer;
     private final String runId;
-    private final int expected;
+    private final AtomicInteger expected = new AtomicInteger(-1);
     private final StageMetrics metrics;
     private final BitSet seen;
     private final CountDownLatch complete = new CountDownLatch(1);
@@ -23,12 +23,11 @@ final class OutputCollector implements AutoCloseable {
     private final AtomicInteger unexpected = new AtomicInteger();
     private final Thread thread;
 
-    OutputCollector(Config config, String runId, int expected, StageMetrics metrics) throws InterruptedException {
+    OutputCollector(Config config, String runId, StageMetrics metrics) throws InterruptedException {
         this.consumer = KafkaSupport.consumer(config, "benchmark-observer-" + runId);
         this.runId = runId;
-        this.expected = expected;
         this.metrics = metrics;
-        this.seen = new BitSet(expected);
+        this.seen = new BitSet();
         thread = Thread.ofPlatform().name("output-observer").start(() -> collect(config.outputTopic()));
         if (!ready.await(config.timeoutSeconds(), java.util.concurrent.TimeUnit.SECONDS)) {
             close();
@@ -45,14 +44,14 @@ final class OutputCollector implements AutoCloseable {
             // publishing before the observer has fixed its historical-data boundary.
             for (var partition : consumer.assignment()) consumer.position(partition);
             ready.countDown();
-            while (running.get() && observed.get() < expected) {
+            while (running.get() && (expected.get() < 0 || observed.get() < expected.get())) {
                 for (ConsumerRecord<String, String> record : consumer.poll(Duration.ofMillis(250))) {
                     OutputEvent output;
                     try { output = EventCodec.readOutput(record.value()); }
                     catch (IllegalArgumentException invalid) { continue; }
                     if (!runId.equals(output.runId())) continue;
                     long sequence = output.sequenceNumber();
-                    if (sequence < 0 || sequence >= expected) { unexpected.incrementAndGet(); continue; }
+                    if (sequence < 0 || sequence > Integer.MAX_VALUE) { unexpected.incrementAndGet(); continue; }
                     synchronized (seen) {
                         if (seen.get((int) sequence)) { duplicates.incrementAndGet(); continue; }
                         seen.set((int) sequence);
@@ -60,7 +59,7 @@ final class OutputCollector implements AutoCloseable {
                     observed.incrementAndGet();
                     long nowEpochMillis = System.currentTimeMillis();
                     metrics.published(Math.max(0, (nowEpochMillis - output.processedTimestamp()) * 1_000_000));
-                    metrics.endToEnd.add(Math.max(0, (nowEpochMillis - output.generatedTimestamp()) * 1_000_000));
+                    metrics.endToEnd(Math.max(0, (nowEpochMillis - output.generatedTimestamp()) * 1_000_000));
                 }
             }
         } catch (org.apache.kafka.common.errors.WakeupException ignored) {
@@ -70,10 +69,13 @@ final class OutputCollector implements AutoCloseable {
 
     boolean await(Duration timeout) throws InterruptedException { return complete.await(timeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS); }
 
+    void expect(int count) { expected.set(count); }
+    int observed() { return observed.get(); }
+
     Validation validation(int sent, int consumed, int published) {
         int found = observed.get();
-        return new Validation(expected, sent, consumed, published, found,
-                Math.max(0, expected - found), duplicates.get(), unexpected.get());
+        return new Validation(expected.get(), sent, consumed, published, found,
+                Math.max(0, expected.get() - found), duplicates.get(), unexpected.get());
     }
 
     @Override public void close() {

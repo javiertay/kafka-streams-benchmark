@@ -18,8 +18,10 @@ record RuntimeDetails(String javaVersion, String javaVendor, String vmName,
 
 record BenchmarkResult(
         String implementation, String timestamp, String runId, int iteration,
-        int eventCount, int requestedPartitions, int actualPartitions, int payloadBytes,
-        int processingThreads, long requestedInputRate, double achievedInputRate,
+        int eventCount, int measurementSeconds, int requestedPartitions, int actualPartitions, int payloadBytes,
+        int serviceInstances, java.util.List<Integer> eventsConsumedPerService,
+        long requestedInputRate, double achievedInputRate, double producerFlushSeconds,
+        int backlogAtGenerationEnd, double catchUpSeconds,
         double ingestionThroughput, Latency ingestionLatency,
         double processingThroughput, Latency processingLatency,
         double publishingThroughput, Latency publishingLatency,
@@ -27,5 +29,5 @@ record BenchmarkResult(
         ResourceUsage resources, Validation validation, RuntimeDetails technicalDetails,
         Map<String, Object> safeConfiguration) {}
 
-record SkippedScenario(int eventCount, int requestedPartitions, int actualPartitions,
-                       int processingThreads, long requestedInputRate, String reason) {}
+record SkippedScenario(int measurementSeconds, int requestedPartitions, int actualPartitions,
+                       int serviceInstances, long requestedInputRate, String reason) {}
