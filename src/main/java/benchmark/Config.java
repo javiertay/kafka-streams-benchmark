@@ -11,7 +11,7 @@ import java.util.Properties;
 import java.util.Set;
 
 record Config(
-        String bootstrapServers, String securityProtocol, Path truststore, String truststorePassword,
+        String bootstrapServers, int brokerCount, String securityProtocol, Path truststore, String truststorePassword,
         String inputTopic, String outputTopic, List<Integer> partitions,
         int payloadBytes, int uniqueKeys, List<Integer> serviceInstances,
         int warmupSeconds, int measurementSeconds, int iterations, List<Long> inputRates, int replicationFactor,
@@ -20,6 +20,7 @@ record Config(
 
     static Config from(Map<String, String> env) {
         String bootstrap = required(env, "KAFKA_BOOTSTRAP_SERVERS");
+        int brokerCount = positiveInt(env, "KAFKA_BROKER_COUNT", 1);
         String securityProtocol = env.getOrDefault("KAFKA_SECURITY_PROTOCOL", "SSL").trim().toUpperCase(Locale.ROOT);
         if (!Set.of("PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL").contains(securityProtocol)) {
             throw new IllegalArgumentException(
@@ -55,7 +56,11 @@ record Config(
                 extras.put(key.substring(15).toLowerCase().replace('_', '.'), value);
             }
         });
-        Config config = new Config(bootstrap, securityProtocol, truststore, password,
+        int replicationFactor = positiveInt(env, "BENCHMARK_REPLICATION_FACTOR", brokerCount);
+        if (replicationFactor > brokerCount) {
+            throw new IllegalArgumentException("BENCHMARK_REPLICATION_FACTOR must not exceed KAFKA_BROKER_COUNT");
+        }
+        Config config = new Config(bootstrap, brokerCount, securityProtocol, truststore, password,
                 env.getOrDefault("BENCHMARK_INPUT_TOPIC", "benchmark-input"),
                 env.getOrDefault("BENCHMARK_OUTPUT_TOPIC", "benchmark-output"),
                 partitions,
@@ -66,7 +71,7 @@ record Config(
                 measurementSeconds,
                 positiveInt(env, "BENCHMARK_ITERATIONS", 3),
                 inputRates,
-                positiveInt(env, "BENCHMARK_REPLICATION_FACTOR", 1),
+                replicationFactor,
                 positiveInt(env, "BENCHMARK_HTTP_PORT", 8080),
                 Path.of(env.getOrDefault("BENCHMARK_RESULTS_DIR", "results")),
                 positiveInt(env, "BENCHMARK_TIMEOUT_SECONDS", 600),
@@ -94,6 +99,7 @@ record Config(
     Map<String, Object> safeConfiguration() {
         Map<String, Object> safe = new LinkedHashMap<>();
         safe.put("bootstrapServers", bootstrapServers);
+        safe.put("brokerCount", brokerCount);
         safe.put("securityProtocol", securityProtocol);
         if (truststore != null) safe.put("truststoreLocation", truststore.toString());
         safe.put("inputTopic", inputTopic);
@@ -103,6 +109,7 @@ record Config(
         safe.put("serviceInstanceScenarios", serviceInstances);
         safe.put("inputRateScenarios", inputRates);
         safe.put("measurementSeconds", measurementSeconds);
+        safe.put("replicationFactor", replicationFactor);
         return safe;
     }
 

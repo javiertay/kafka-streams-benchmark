@@ -65,6 +65,8 @@ class ReportWriterTest {
         assertTrue(html.contains("1,000,000 events/s"));
         assertTrue(html.contains("1 service"));
         assertTrue(html.contains("3 services"));
+        assertTrue(html.contains("3 brokers, replication factor 3"));
+        assertTrue(html.contains("only this broker-count environment"));
         assertEquals(2, html.split("role=\"tab\"", -1).length - 1);
         assertTrue(html.contains("Backlog at generation end"));
         assertTrue(html.contains("Catch-up time"));
@@ -85,6 +87,6 @@ class ReportWriterTest {
                 new Validation(100_000, 100_000, 100_000, 100_000, valid ? 100_000 : 99_999,
                         valid ? 0 : 1, 0, 0),
                 new RuntimeDetails("25", "vendor", "vm", "4.1.0", "G1", 512, "", 0, 0),
-                Map.of());
+                Map.of("brokerCount", 3, "replicationFactor", 3));
     }
 }

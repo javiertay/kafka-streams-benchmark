@@ -21,24 +21,26 @@ The benchmark asks: with the same Java runtime, Kafka cluster, deterministic JSO
 - **Average/peak CPU and RAM:** aggregate samples across processor service JVMs only; generator and observer resources are excluded.
 - **Technical details:** Java/Kafka versions, GC, heap limit, JVM flags, GC activity, and safe client settings.
 
-The static report starts with an overall verdict based on configuration wins, has one tab per duration × rate × partition × service-count configuration, explains the measurements for non-developers, highlights a winner only for valid runs, and treats values tied after rounding to two decimal places as ties.
+The static report starts with an overall verdict based on configuration wins, identifies the broker count and replication factor, has one tab per duration × rate × partition × service-count configuration, explains the measurements for non-developers, highlights a winner only for valid runs, and treats values tied after rounding to two decimal places as ties.
 
 ## Requirements
 
-- Docker with access to an existing Kafka cluster.
+- Docker. The included Compose environment provides a local Kafka cluster; an existing cluster can be used instead.
 - For `SSL` or `SASL_SSL`, Kafka broker certificates trusted by a JKS or PKCS12 truststore.
 - Permission to describe/create topics and increase partition counts.
 - Enough disk space for two retained benchmark topics and the requested event volumes.
 
-Kafka is external and is not included. The build and runtime use Eclipse Temurin Java 25. Maven runs inside the multi-stage Docker build; no host Maven installation is required.
+The build and runtime use Eclipse Temurin Java 25. Maven runs inside the multi-stage Docker build; no host Maven installation is required.
 
 ## Local plaintext smoke test
 
-[`compose.yaml`](compose.yaml) starts eight local services:
+[`compose.yaml`](compose.yaml) defines ten local services:
 
-- `kafka`: the official Apache Kafka 4.1.0 image running one combined KRaft broker/controller with plaintext listeners.
+- `kafka-1` through `kafka-3`: the official Apache Kafka 4.1.0 image running up to three combined KRaft broker/controllers with plaintext listeners.
 - `benchmark`: the coordinator, fixed-duration workload generator, output observer, result writer, and report server.
 - `benchmark-worker-1` through `benchmark-worker-6`: separate JVM/container processor services activated by the coordinator as each scenario requires.
+
+The cluster defaults to three active brokers and replication factor three. Set `KAFKA_BROKER_COUNT` to `1`, `2`, or `3`; broker containers above that number remain idle, and the benchmark topic and Kafka internal-topic replication factors follow the active broker count. Minimum in-sync replicas is one for the single-broker baseline and two for the two- or three-broker environments. The coordinator waits until Kafka reports exactly the configured number before starting the matrix, so a partially formed cluster fails clearly instead of producing a misleading result.
 
 The local defaults run a load matrix with:
 
@@ -54,13 +56,26 @@ Processors and the output observer start first. The coordinator waits for Kafka 
 
 At the local 10-second default, the theoretical counts are one million events at 100k/s and ten million at 1m/s. If the generator reaches only 350k/s during the 1m/s scenario, the result reports roughly 3.5 million generated events and 350k/s rather than taking longer to force ten million records through. This distinguishes an unattained offered-load target from consumer performance.
 
-Start both services:
+Start the default three-broker environment:
 
 ```bash
 docker compose up --build
 ```
 
-Wait for the benchmark log to print `[server] READY: benchmark complete; results available at http://localhost:8080`, then open <http://localhost:8080>. Kafka is also reachable from host tools at `localhost:9092`.
+To run the single-broker baseline instead, set the environment variable before starting Compose:
+
+```bash
+KAFKA_BROKER_COUNT=1 docker compose up --build
+```
+
+In PowerShell:
+
+```powershell
+$env:KAFKA_BROKER_COUNT = "1"
+docker compose up --build
+```
+
+Wait for the benchmark log to print `[server] READY: benchmark complete; results available at http://localhost:8080`, then open <http://localhost:8080>. Host tools can use `localhost:9092`, `localhost:9093`, and `localhost:9094` for the active brokers.
 
 ### Reading benchmark progress
 
@@ -85,7 +100,9 @@ Stop and remove the local containers and network:
 docker compose down
 ```
 
-The Compose setup intentionally has no persistent volumes. Its topics and benchmark results disappear with the containers. The default matrix can process many millions of records and takes several minutes. Increase `BENCHMARK_MEASUREMENT_SECONDS` to 30–60 for decision-grade sustained tests after checking broker disk capacity. This single-node plaintext broker is for local testing only and must not be used as a production Kafka configuration.
+The Compose setup intentionally has no persistent volumes. Its topics and benchmark results disappear with the containers. The default matrix can process many millions of records and takes several minutes. Increase `BENCHMARK_MEASUREMENT_SECONDS` to 30–60 for decision-grade sustained tests after checking broker disk capacity. This plaintext combined broker/controller topology is for local testing only and must not be used as a production Kafka configuration.
+
+Run the one-broker and three-broker environments separately. Each invocation creates one report and one verdict, and the HTML names that report's broker count and replication factor. Do not merge their configuration wins: changing broker count and replication changes the environment, so compare the two reports side by side.
 
 ## Build and run
 
@@ -97,6 +114,7 @@ docker build -t kafka-streams-vs-java-benchmark .
 docker run --rm \
   -p 8080:8080 \
   -e KAFKA_BOOTSTRAP_SERVERS=kafka.example.com:9093 \
+  -e KAFKA_BROKER_COUNT=3 \
   -e KAFKA_SECURITY_PROTOCOL=SSL \
   -e KAFKA_TRUSTSTORE_LOCATION=/certs/kafka.truststore.jks \
   -e KAFKA_TRUSTSTORE_PASSWORD=changeit \
@@ -106,6 +124,7 @@ docker run --rm \
   -e BENCHMARK_PAYLOAD_BYTES=1024 \
   -e BENCHMARK_SERVICE_INSTANCES=1 \
   -e BENCHMARK_WORKER_URLS=http://benchmark-worker-1:8080 \
+  -e BENCHMARK_REPLICATION_FACTOR=3 \
   -v /local/path/kafka.truststore.jks:/certs/kafka.truststore.jks:ro \
   -v ./benchmark-results:/app/results \
   kafka-streams-vs-java-benchmark
@@ -122,6 +141,7 @@ The `/app/results` volume is optional. Omit `-v ./benchmark-results:/app/results
 | Environment variable | Default | Meaning |
 |---|---:|---|
 | `KAFKA_BOOTSTRAP_SERVERS` | required | Kafka bootstrap addresses |
+| `KAFKA_BROKER_COUNT` | `1` | Exact broker count expected in the connected cluster; Compose accepts `1`, `2`, or `3` and defaults it to `3` |
 | `KAFKA_SECURITY_PROTOCOL` | `SSL` | `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT`, or `SASL_SSL` |
 | `KAFKA_TRUSTSTORE_LOCATION` | required for SSL protocols | Truststore path inside the container |
 | `KAFKA_TRUSTSTORE_PASSWORD` | required for SSL protocols | Truststore password; never persisted |
@@ -138,11 +158,13 @@ The `/app/results` volume is optional. Omit `-v ./benchmark-results:/app/results
 | `BENCHMARK_MEASUREMENT_SECONDS` | `30` | Fixed offered-load window used to derive the maximum possible event count |
 | `BENCHMARK_ITERATIONS` | `3` | Measured iterations; median is primary |
 | `BENCHMARK_INPUT_RATES` | `100000,1000000` | Comma-separated positive offered-load targets in events/sec |
-| `BENCHMARK_REPLICATION_FACTOR` | `1` | Replication factor for newly created topics |
+| `BENCHMARK_REPLICATION_FACTOR` | `KAFKA_BROKER_COUNT` | Replication factor for newly created topics; cannot exceed the configured broker count |
 | `BENCHMARK_TIMEOUT_SECONDS` | `600` | Per-run completion timeout |
 | `BENCHMARK_HTTP_PORT` | `8080` | Report server port |
 | `BENCHMARK_RESULTS_DIR` | `/app/results` | Raw JSON, summary JSON, and HTML location |
 | `KAFKA_STREAMS_PROCESSING_GUARANTEE` | `at_least_once` | Kafka Streams guarantee |
+
+`KAFKA_BROKER_COUNT` describes one benchmark environment; it is not another scenario axis inside the report. The coordinator checks the actual cluster membership before creating topics. Use a separate results directory or preserve each generated report before changing this value.
 
 `KAFKA_SECURITY_PROTOCOL` is shared by the admin client, workload producer, output observer, Kafka Streams, and conventional clients. Truststore settings are validated only for `SSL` and `SASL_SSL`. For example, `KAFKA_PROPERTY_SSL_TRUSTSTORE_TYPE=PKCS12` supplies `ssl.truststore.type=PKCS12`. Extra properties can configure SASL, hostname verification, or mutual TLS, but secrets supplied this way should be treated as environment secrets. They are not copied into result files.
 

@@ -10,6 +10,11 @@ final class BenchmarkOrchestrator {
 
     void run(Config config) throws Exception {
         long matrixStarted = System.nanoTime();
+        System.out.printf("[benchmark] Waiting for %d Kafka broker%s%n", config.brokerCount(),
+                config.brokerCount() == 1 ? "" : "s");
+        KafkaSupport.awaitBrokerCount(config);
+        System.out.printf("[benchmark] Kafka cluster ready: %d broker%s, replication factor %d%n",
+                config.brokerCount(), config.brokerCount() == 1 ? "" : "s", config.replicationFactor());
         int totalScenarios = config.inputRates().size() * config.partitions().stream()
                 .mapToInt(partitions -> (int) config.serviceInstances().stream()
                         .filter(services -> isMeaningfulScalingScenario(partitions, services)).count())

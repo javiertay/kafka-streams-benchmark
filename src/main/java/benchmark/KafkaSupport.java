@@ -23,6 +23,20 @@ import java.util.Set;
 final class KafkaSupport {
     private KafkaSupport() {}
 
+    static void awaitBrokerCount(Config config) throws Exception {
+        long deadline = System.nanoTime() + config.timeoutSeconds() * 1_000_000_000L;
+        int actual = 0;
+        try (AdminClient admin = AdminClient.create(config.kafkaProperties())) {
+            while (System.nanoTime() < deadline) {
+                actual = admin.describeCluster().nodes().get().size();
+                if (actual == config.brokerCount()) return;
+                Thread.sleep(250);
+            }
+        }
+        throw new IllegalStateException("Kafka cluster has " + actual + " brokers; expected "
+                + config.brokerCount() + " from KAFKA_BROKER_COUNT");
+    }
+
     static int ensurePartitions(Config config, int requested) throws Exception {
         try (AdminClient admin = AdminClient.create(config.kafkaProperties())) {
             Set<String> existing = admin.listTopics().names().get();

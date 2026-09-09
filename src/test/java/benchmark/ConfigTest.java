@@ -20,6 +20,7 @@ class ConfigTest {
         env.put("KAFKA_BOOTSTRAP_SERVERS", "kafka:9093");
         env.put("KAFKA_TRUSTSTORE_LOCATION", truststore.toString());
         env.put("KAFKA_TRUSTSTORE_PASSWORD", "secret");
+        env.put("KAFKA_BROKER_COUNT", "3");
         env.put("BENCHMARK_PARTITIONS", "1,3");
         env.put("BENCHMARK_SERVICE_INSTANCES", "1,3,6");
         env.put("BENCHMARK_INPUT_RATES", "100000,1000000");
@@ -31,6 +32,8 @@ class ConfigTest {
         assertEquals(java.util.List.of(100_000L, 1_000_000L), config.inputRates());
         assertEquals(10, config.measurementSeconds());
         assertEquals(java.util.List.of("http://worker-1:8080", "http://worker-2:8080"), config.workerUrls());
+        assertEquals(3, config.brokerCount());
+        assertEquals(3, config.replicationFactor());
         assertEquals("SSL", config.securityProtocol());
         assertEquals("SSL", config.kafkaProperties().get("security.protocol"));
         assertEquals("https", config.extraKafkaProperties().get("ssl.endpoint.identification.algorithm"));
@@ -100,5 +103,13 @@ class ConfigTest {
                 "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
                 "BENCHMARK_INPUT_RATES", "1000000000",
                 "BENCHMARK_MEASUREMENT_SECONDS", "3")));
+    }
+
+    @Test void rejectsReplicationFactorAboveBrokerCount() {
+        assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
+                "KAFKA_BROKER_COUNT", "2",
+                "BENCHMARK_REPLICATION_FACTOR", "3")));
     }
 }

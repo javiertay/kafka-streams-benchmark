@@ -25,6 +25,7 @@ final class ReportWriter {
     }
 
     String html(List<BenchmarkResult> results, List<SkippedScenario> skipped) {
+        String environment = environmentSummary(results);
         StringBuilder scenarios = new StringBuilder();
         List<Scenario> scenarioList = scenarios(results);
         StringBuilder tabs = new StringBuilder();
@@ -56,6 +57,7 @@ final class ReportWriter {
                 </style></head><body><main>
                 <header><h1>Kafka Streams vs Plain Java</h1><p class="lead purpose"><strong>What performance are we testing?</strong> This benchmark measures how quickly each implementation ingests, processes, and publishes the same deterministic JSON events, plus total throughput, end-to-end latency, CPU, and RAM.</p>
                 <p class="lead"><strong>Why are we doing this?</strong> To make an evidence-based choice between Kafka Streams and direct <code>KafkaConsumer</code>/<code>KafkaProducer</code> code under the same Java 25 runtime, Kafka cluster, workload, partitions, processing logic, and resource limits. Results describe this environment only; they are not universal performance claims.</p>
+                """ + environment + """
                 <p class="muted">Green marks the better displayed value. Values that round to the same display precision are ties. Invalid runs never receive a winner.</p></header>
                 <section class="card"><h2>Overall summary</h2><p class="verdict"><strong>""" + escape(overallSummary(results)) + """
                 </strong></p><p class="muted">Each complete, valid configuration gets one vote based on median total throughput. Workloads are not averaged together.</p></section>
@@ -200,6 +202,16 @@ final class ReportWriter {
     private static String number(long number) { return String.format(Locale.ROOT, "%,d", number); }
     private static String rate(long inputRate) { return inputRate == 0 ? "unthrottled" : number(inputRate) + " events/s"; }
     private static String services(int count) { return count + (count == 1 ? " service" : " services"); }
+    private static String environmentSummary(List<BenchmarkResult> results) {
+        if (results.isEmpty()) return "";
+        Object brokers = results.getFirst().safeConfiguration().get("brokerCount");
+        Object replication = results.getFirst().safeConfiguration().get("replicationFactor");
+        if (!(brokers instanceof Number brokerCount) || !(replication instanceof Number replicationFactor)) return "";
+        int count = brokerCount.intValue();
+        return "<p class=\"lead\"><strong>Kafka environment:</strong> " + count
+                + (count == 1 ? " broker" : " brokers") + ", replication factor "
+                + replicationFactor.intValue() + ". This report contains only this broker-count environment.</p>";
+    }
     private static String plural(int count) { return count == 1 ? "" : "s"; }
     private static String distribution(List<Integer> counts) { return counts.stream().map(ReportWriter::number).collect(java.util.stream.Collectors.joining(" / ")); }
     private static double backlogPercent(BenchmarkResult result) { return result.eventCount() == 0 ? 0 : result.backlogAtGenerationEnd() * 100.0 / result.eventCount(); }

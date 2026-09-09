@@ -19,6 +19,10 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 - Added an HTML overall summary that declares whether Kafka Streams or plain Java did better by counting valid configuration wins using median total throughput; ties and excluded invalid comparisons are shown explicitly.
 - Reduced the partition/service matrix to meaningful combinations only: service counts greater than requested partitions are omitted, leaving `1/1`, `3/1`, `3/3`, `6/1`, `6/3`, and `6/6` for the Compose defaults.
 - Split the two worker implementations into presentation-friendly `KafkaStreamsProcessor.java` and `TraditionalKafkaProcessor.java` files. Removed the empty `StreamsRunner`/`PlainRunner` subclasses and kept orchestration in the shared `DistributedRunner`.
+- Replaced the single local broker with a configurable one-to-three-broker plaintext KRaft cluster. Compose defaults to three active brokers; `KAFKA_BROKER_COUNT=1` or `2` leaves higher-numbered broker containers idle.
+- Made benchmark topic replication default to the configured broker count, configured local minimum ISR as one for a single broker and two otherwise, and reject replication factors above the declared broker count.
+- Added a coordinator preflight that waits for exactly `KAFKA_BROKER_COUNT` registered brokers before any scenario starts.
+- Added broker count and replication factor to safe result configuration and to the HTML report header so one- and three-broker verdicts remain visibly separate.
 
 # Files changed
 
@@ -29,8 +33,10 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 
 # Commands run and results
 
-- Final Dockerized Maven `mvn -B verify` after separating the processor implementations — passed with 19 production sources and 21 tests.
-- `docker-compose -f compose.yaml config --quiet` — passed for the eight-service Compose model.
+- Dockerized Maven `mvn -B verify` after the broker-count changes — passed with 19 production sources and 22 tests.
+- `docker-compose -f compose.yaml config --quiet` — passed with both the default three-broker interpolation and `KAFKA_BROKER_COUNT=1`.
+- Three-broker Compose smoke at 1k events/s, one partition, one service, and one measured second — passed for Kafka Streams and plain Java with 1,001/1,001 outputs validated. Coordinator detected three brokers and replication factor three; topic metadata showed replicas/ISR on brokers 1, 2, and 3 and minimum ISR two; report returned HTTP 200 and named the 3-broker/RF3 environment.
+- Single-broker Compose smoke with the same workload — passed for both implementations with 1,001/1,001 outputs validated. Brokers 2 and 3 logged that they were disabled, coordinator detected one broker and replication factor one, topic metadata showed RF1/minimum ISR1, and the report named the 1-broker/RF1 environment.
 - Final distributed Compose smoke test using a fresh plaintext broker, 1-second load at 10k events/s, 3 partitions, and 1/3 services — passed with 4 valid results and zero missing/duplicate/unexpected outputs.
 - Final smoke distributions: Kafka Streams 3-service run consumed 3240/3361/3400; plain Java consumed 3400/3360/3239.
 - Final smoke achieved about 10k events/s in every run. Window-boundary backlog/catch-up examples were 976/0.14s for one Kafka Streams service, 57/0.01s for one plain service, 3501/2.46s for three Streams services, and 326/0.03s for three plain services.
@@ -45,6 +51,7 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 - The complete default 10-second × 100k/1m rates × 1/3/6 partitions × 1/3/6 services matrix has not been run; only the focused distributed smoke matrix is integration-verified.
 - A run where achieved input rate is below the target does not prove consumer capacity at that target; it identifies the generator, broker, or network as the limiting path.
 - No SSL Kafka cluster was supplied, so SSL integration remains unverified.
+- The two-broker option is structurally configured and Compose-validated but has not received a full runtime smoke test; the requested one- and three-broker comparison modes have.
 - Fixed-rate results do not yet include Kafka committed-offset lag; backlog is measured from generated versus observed run events.
 
 # Next recommended steps
