@@ -23,4 +23,11 @@ class StatisticsTest {
         for (int i = 0; i < 200_000; i++) metrics.processed(i);
         assertEquals(100_000, metrics.processing.size());
     }
+
+    @Test void throughputCountsIntervalsBetweenEvents() {
+        StageMetrics metrics = new StageMetrics(3);
+        metrics.firstProcessNanos.set(1_000_000_000L);
+        metrics.lastProcessNanos.set(2_000_000_000L);
+        assertEquals(2, metrics.throughput(metrics.firstProcessNanos, metrics.lastProcessNanos, 3));
+    }
 }

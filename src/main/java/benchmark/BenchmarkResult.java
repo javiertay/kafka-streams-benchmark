@@ -25,6 +25,7 @@ record BenchmarkResult(
         int backlogAtGenerationEnd, double catchUpSeconds,
         double ingestionThroughput, Latency ingestionLatency,
         double processingThroughput, Latency processingLatency,
+        Latency metadataFlushLatency,
         double publishingThroughput, Latency publishingLatency,
         double totalElapsedSeconds, double totalThroughput, Latency endToEndLatency,
         ResourceUsage resources, Validation validation, RuntimeDetails technicalDetails,

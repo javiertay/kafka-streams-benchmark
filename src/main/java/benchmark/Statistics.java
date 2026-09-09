@@ -45,6 +45,7 @@ final class StageMetrics {
     private static final int MAX_SAMPLES_PER_STAGE = 100_000;
     final ConcurrentLinkedQueue<Long> ingestion = new ConcurrentLinkedQueue<>();
     final ConcurrentLinkedQueue<Long> processing = new ConcurrentLinkedQueue<>();
+    final ConcurrentLinkedQueue<Long> flushing = new ConcurrentLinkedQueue<>();
     final ConcurrentLinkedQueue<Long> publishing = new ConcurrentLinkedQueue<>();
     final ConcurrentLinkedQueue<Long> endToEnd = new ConcurrentLinkedQueue<>();
     final AtomicLong firstIngestNanos = new AtomicLong();
@@ -65,28 +66,36 @@ final class StageMetrics {
 
     void ingested(long latency) { sample(ingestion, ingestionSeen, latency); mark(firstIngestNanos, lastIngestNanos); }
     void processed(long latency) { sample(processing, processingSeen, latency); mark(firstProcessNanos, lastProcessNanos); }
-    void published(long latency) { sample(publishing, publishingSeen, latency); mark(firstPublishNanos, lastPublishNanos); }
+    void flushed(long latency) { flushing.add(latency); }
+    void published(long latency) { sample(publishing, publishingSeen, latency); markMonotonic(firstPublishNanos, lastPublishNanos); }
     void endToEnd(long latency) { sample(endToEnd, endToEndSeen, latency); }
 
     MetricsSnapshot snapshot() {
-        return new MetricsSnapshot(List.copyOf(ingestion), List.copyOf(processing),
+        return new MetricsSnapshot(List.copyOf(ingestion), List.copyOf(processing), List.copyOf(flushing),
                 firstIngestNanos.get(), lastIngestNanos.get(), firstProcessNanos.get(), lastProcessNanos.get());
     }
 
     void merge(MetricsSnapshot snapshot) {
         ingestion.addAll(snapshot.ingestion());
         processing.addAll(snapshot.processing());
+        flushing.addAll(snapshot.flushing());
         mergeRange(firstIngestNanos, lastIngestNanos, snapshot.firstIngest(), snapshot.lastIngest());
         mergeRange(firstProcessNanos, lastProcessNanos, snapshot.firstProcess(), snapshot.lastProcess());
     }
 
     double throughput(AtomicLong first, AtomicLong last, int count) {
         long duration = last.get() - first.get();
-        return duration <= 0 ? 0 : count * 1_000_000_000.0 / duration;
+        return duration <= 0 || count < 2 ? 0 : (count - 1) * 1_000_000_000.0 / duration;
     }
 
     private static void mark(AtomicLong first, AtomicLong last) {
         long now = System.currentTimeMillis() * 1_000_000;
+        first.compareAndSet(0, now);
+        last.set(now);
+    }
+
+    private static void markMonotonic(AtomicLong first, AtomicLong last) {
+        long now = System.nanoTime();
         first.compareAndSet(0, now);
         last.set(now);
     }
@@ -101,5 +110,5 @@ final class StageMetrics {
     }
 }
 
-record MetricsSnapshot(List<Long> ingestion, List<Long> processing,
+record MetricsSnapshot(List<Long> ingestion, List<Long> processing, List<Long> flushing,
                        long firstIngest, long lastIngest, long firstProcess, long lastProcess) {}

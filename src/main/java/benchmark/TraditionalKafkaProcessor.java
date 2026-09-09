@@ -59,6 +59,7 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
     }
 
     private void process(Config config, WorkerCommand command, ConsumerRecord<String, String> record) {
+        long started = System.nanoTime();
         InputEvent input;
         try {
             input = EventCodec.readInput(record.value());
@@ -73,7 +74,6 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
 
         metrics.ingested(Math.max(0,
                 (System.currentTimeMillis() - input.generatedTimestamp()) * 1_000_000));
-        long started = System.nanoTime();
         consumed.incrementAndGet();
         if (config.processingMode() == ProcessingMode.METADATA) {
             if (!input.eventId().equals(lastEventIds.put(input.key(), input.eventId()))) {
@@ -86,11 +86,12 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
             return;
         }
         OutputEvent output = Workload.transform(input, System.currentTimeMillis());
-        metrics.processed(System.nanoTime() - started);
         publish(output);
+        metrics.processed(System.nanoTime() - started);
     }
 
     private void publishAggregates(int partition) {
+        long started = System.nanoTime();
         String prefix = partition + ":";
         Iterator<Map.Entry<String, OutputEvent>> iterator = aggregates.entrySet().iterator();
         while (iterator.hasNext()) {
@@ -99,6 +100,7 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
             publish(aggregate.getValue());
             iterator.remove();
         }
+        metrics.flushed(System.nanoTime() - started);
     }
 
     private void publish(OutputEvent output) {

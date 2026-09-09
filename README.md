@@ -12,9 +12,10 @@ The benchmark asks: with the same Java runtime, Kafka cluster, deterministic JSO
 ## What it measures
 
 - **Ingestion throughput and p50/p95/p99 latency:** receiving records from Kafka.
-- **Processing throughput and p50/p95/p99 latency:** JSON decoding plus either a deterministic transform or metadata deduplication and aggregation.
+- **Processing throughput and p50/p95/p99 latency:** identically timed from JSON decoding through business logic and output handoff for both implementations.
+- **Metadata flush p50/p95/p99 latency:** final aggregate scan and output handoff per partition completion marker. This is reported separately from per-input processing.
 - **Publishing throughput and p50/p95/p99 latency:** time from processing completion until the output observer receives the record. This is publish-to-observe latency, not asynchronous API submission time. Kafka Streams does not expose per-record producer callbacks, so this definition is used for both implementations.
-- **Total elapsed time and throughput:** processor start until all expected outputs are observed.
+- **Total elapsed time and input throughput:** input generation start until all expected outputs are observed. Throughput uses consumed inputs, not output count, so suppressed metadata output does not artificially lower processing capacity.
 - **End-to-end p50/p95/p99 latency:** input generation through output observation.
 - **Offered versus achieved input rate:** whether the independent generator can deliver the requested load for the configured measurement window.
 - **Backlog and catch-up time:** how many expected outputs remain unobserved when the measurement window closes, and how long processors need to publish them.
@@ -271,9 +272,9 @@ Both paths use Java 25, the same image and service count, Jackson JSON, identica
 
 A result is valid only when every sent input was consumed, every expected output was published and observed, and missing, duplicate, unexpected, and incorrect-aggregate counts are zero. Invalid comparisons receive no green winner highlight. Raw files include all of these validation counters.
 
-For repeated runs, the HTML selects the median iteration by total throughput and shows its metrics, plus the minimum and maximum total-throughput range. It never picks the fastest run as the headline result. Latency queues retain at most 100,000 evenly spaced samples per stage so a sustained 1m/s test does not exhaust the JVM heap.
+For repeated runs, the HTML selects the median iteration by end-to-end input throughput and shows its metrics, plus the minimum and maximum throughput range. It never picks the fastest run as the headline result. Latency queues retain at most 100,000 evenly spaced samples per stage so a sustained 1m/s test does not exhaust the JVM heap.
 
-The overall summary gives each complete, valid configuration one vote according to which implementation has higher median total throughput. It reports Kafka Streams wins, plain Java wins, ties, and excluded invalid comparisons. It does not average throughput across different offered rates, partition counts, or service counts.
+The overall summary gives each complete, valid configuration one vote according to which implementation has higher median end-to-end input throughput. It reports Kafka Streams wins, plain Java wins, ties, and excluded invalid comparisons. It does not average throughput across different offered rates, partition counts, or service counts.
 
 ## Interpreting sustained-load results
 

@@ -98,8 +98,9 @@ final class RunSupport {
                 Statistics.latency(metrics.ingestion),
                 metrics.throughput(metrics.firstProcessNanos, metrics.lastProcessNanos, validation.consumed()),
                 Statistics.latency(metrics.processing),
+                Statistics.latency(metrics.flushing),
                 metrics.throughput(metrics.firstPublishNanos, metrics.lastPublishNanos, validation.observed()),
-                Statistics.latency(metrics.publishing), elapsed, elapsed == 0 ? 0 : validation.observed() / elapsed,
+                Statistics.latency(metrics.publishing), elapsed, elapsed == 0 ? 0 : validation.consumed() / elapsed,
                 Statistics.latency(metrics.endToEnd), resources, validation, details, config.safeConfiguration());
     }
 

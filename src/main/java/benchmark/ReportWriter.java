@@ -60,12 +60,12 @@ final class ReportWriter {
                 """ + environment + """
                 <p class="muted">Green marks the better displayed value. Values that round to the same display precision are ties. Invalid runs never receive a winner.</p></header>
                 <section class="card"><h2>Overall summary</h2><p class="verdict"><strong>""" + escape(overallSummary(results)) + """
-                </strong></p><p class="muted">Each complete, valid configuration gets one vote based on median total throughput. Workloads are not averaged together.</p></section>
+                </strong></p><p class="muted">Each complete, valid configuration gets one vote based on median end-to-end input throughput. Workloads are not averaged together.</p></section>
                 <section class="card"><h2>How to read the results</h2><p><strong>Achieved input rate:</strong> what the independent generator actually delivered during the fixed window. <strong>Expected outputs:</strong> equals generated inputs in transform mode, but is the number of final key/window aggregates in metadata mode. <strong>Backlog at generation end:</strong> expected outputs not yet observed when that window closed; near zero means the processors kept up or emitted promptly. <strong>Catch-up time:</strong> time needed to publish the remaining outputs. <strong>CPU/RAM:</strong> totals across processor services only; generator and observer resources are excluded.</p></section>
                 """ + (tabs.isEmpty() ? "" : "<nav class=\"config-tabs\" role=\"tablist\" aria-label=\"Benchmark configurations\">" + tabs + "</nav>")
                 + scenarios + (skipHtml.isEmpty() ? "" : "<section class=\"card\"><h2>Skipped scenarios</h2><ul>" + skipHtml + "</ul></section>") + """
                 <section class="card"><h2>Advanced JVM metrics</h2><p>Runtime, GC, heap, and safe Kafka configuration are available in <a href="summary.json">summary.json</a> and the per-run raw JSON files. Credentials are never written.</p>
-                <details><summary>Measurement notes and limitations</summary><p>Kafka Streams does not expose a per-record producer acknowledgement callback. For fairness, publishing latency for both implementations is measured from processing completion until the output observer receives the record. Latency percentiles use at most 100,000 evenly spaced samples per stage. Historical records are filtered by unique run ID.</p></details></section>
+                <details><summary>Measurement notes and limitations</summary><p>Processing is timed identically from JSON decoding through business logic and output handoff. Metadata flush latency measures each partition's final aggregate scan and handoff separately. Kafka Streams does not expose a per-record producer acknowledgement callback, so publishing latency is measured from business-logic completion until the output observer receives the record. Latency percentiles use at most 100,000 evenly spaced samples per stage. Historical records are filtered by unique run ID.</p></details></section>
                 </main><script>function showScenario(n){document.querySelectorAll('.scenario-panel').forEach((p,i)=>p.hidden=i!==n);document.querySelectorAll('.config-tab').forEach((b,i)=>b.setAttribute('aria-selected',i===n))}</script></body></html>
                 """;
     }
@@ -89,11 +89,18 @@ final class ReportWriter {
         rows.append(metricRow("Ingestion p95", streams.ingestionLatency().p95Ms(), plain.ingestionLatency().p95Ms(), false, " ms", valid));
         rows.append(metricRow("Ingestion p99", streams.ingestionLatency().p99Ms(), plain.ingestionLatency().p99Ms(), false, " ms", valid));
         rows.append(metricRow("Processing throughput", streams.processingThroughput(), plain.processingThroughput(), true, "/s", valid));
+        rows.append(metricRow("Processing p50", streams.processingLatency().p50Ms(), plain.processingLatency().p50Ms(), false, " ms", valid));
+        rows.append(metricRow("Processing p95", streams.processingLatency().p95Ms(), plain.processingLatency().p95Ms(), false, " ms", valid));
         rows.append(metricRow("Processing p99", streams.processingLatency().p99Ms(), plain.processingLatency().p99Ms(), false, " ms", valid));
+        if (isMetadata(streams)) {
+            rows.append(metricRow("Metadata flush p50", streams.metadataFlushLatency().p50Ms(), plain.metadataFlushLatency().p50Ms(), false, " ms", valid));
+            rows.append(metricRow("Metadata flush p95", streams.metadataFlushLatency().p95Ms(), plain.metadataFlushLatency().p95Ms(), false, " ms", valid));
+            rows.append(metricRow("Metadata flush p99", streams.metadataFlushLatency().p99Ms(), plain.metadataFlushLatency().p99Ms(), false, " ms", valid));
+        }
         rows.append(metricRow("Publishing throughput", streams.publishingThroughput(), plain.publishingThroughput(), true, "/s", valid));
         rows.append(metricRow("Publishing p99", streams.publishingLatency().p99Ms(), plain.publishingLatency().p99Ms(), false, " ms", valid));
         rows.append(metricRow("Total elapsed time", streams.totalElapsedSeconds(), plain.totalElapsedSeconds(), false, " s", valid));
-        rows.append(metricRow("Total throughput", streams.totalThroughput(), plain.totalThroughput(), true, "/s", valid));
+        rows.append(metricRow("End-to-end input throughput", streams.totalThroughput(), plain.totalThroughput(), true, "/s", valid));
         rows.append(metricRow("End-to-end p50", streams.endToEndLatency().p50Ms(), plain.endToEndLatency().p50Ms(), false, " ms", valid));
         rows.append(metricRow("End-to-end p95", streams.endToEndLatency().p95Ms(), plain.endToEndLatency().p95Ms(), false, " ms", valid));
         rows.append(metricRow("End-to-end p99", streams.endToEndLatency().p99Ms(), plain.endToEndLatency().p99Ms(), false, " ms", valid));
@@ -101,7 +108,7 @@ final class ReportWriter {
         rows.append(metricRow("Peak CPU", streams.resources().peakCpuPercent(), plain.resources().peakCpuPercent(), false, "%", valid));
         rows.append(metricRow("Average RAM", streams.resources().averageRamMb(), plain.resources().averageRamMb(), false, " MB", valid));
         rows.append(metricRow("Peak RAM", streams.resources().peakRamMb(), plain.resources().peakRamMb(), false, " MB", valid));
-        String range = String.format(Locale.ROOT, "Median of %d/%d iterations; total throughput ranges %.1f–%.1f/s vs %.1f–%.1f/s.",
+        String range = String.format(Locale.ROOT, "Median of %d/%d iterations; end-to-end input throughput ranges %.1f–%.1f/s vs %.1f–%.1f/s.",
                 streamsRuns.size(), plainRuns.size(), min(streamsRuns), max(streamsRuns), min(plainRuns), max(plainRuns));
         String status = valid ? "<span class=\"valid\">Valid: all inputs were consumed and all expected outputs were published and observed once.</span>" :
                 "<div class=\"invalid\">Invalid: output validation failed. No winner is highlighted.</div>";
@@ -125,7 +132,7 @@ final class ReportWriter {
         double slower = Math.min(streams, plain);
         double difference = slower == 0 ? 0 : (Math.max(streams, plain) - slower) / slower * 100;
         String winner = streams > plain ? "Kafka Streams" : "Plain Java";
-        return String.format(Locale.ROOT, "%s had %.1f%% higher total throughput.", winner, difference);
+        return String.format(Locale.ROOT, "%s had %.1f%% higher end-to-end input throughput.", winner, difference);
     }
 
     static String overallSummary(List<BenchmarkResult> results) {
@@ -226,6 +233,9 @@ final class ReportWriter {
     private static double backlogPercent(BenchmarkResult result) {
         return result.validation().expected() == 0 ? 0
                 : result.backlogAtGenerationEnd() * 100.0 / result.validation().expected();
+    }
+    private static boolean isMetadata(BenchmarkResult result) {
+        return "metadata".equals(result.safeConfiguration().get("processingMode"));
     }
     private static String escape(String value) { return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;"); }
 

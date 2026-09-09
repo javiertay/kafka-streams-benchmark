@@ -43,9 +43,7 @@ final class KafkaStreamsProcessor implements ProcessorSession {
 
     private Topology buildTopology(Config config, WorkerCommand command) {
         StreamsBuilder builder = new StreamsBuilder();
-        var input = builder.stream(config.inputTopic(), Consumed.with(Serdes.String(), Serdes.String()))
-                .filter((key, value) -> value != null
-                        && value.contains("\"runId\":\"" + command.runId() + "\""));
+        var input = builder.stream(config.inputTopic(), Consumed.with(Serdes.String(), Serdes.String()));
         if (config.processingMode() == ProcessingMode.METADATA) {
             builder.addStateStore(Stores.keyValueStoreBuilder(
                     Stores.inMemoryKeyValueStore(DEDUPE_STORE), Serdes.String(), Serdes.String())
@@ -53,16 +51,16 @@ final class KafkaStreamsProcessor implements ProcessorSession {
             builder.addStateStore(Stores.keyValueStoreBuilder(
                     Stores.inMemoryKeyValueStore(AGGREGATE_STORE), Serdes.String(), Serdes.String())
                     .withLoggingDisabled());
-            input.process(this::metadataProcessor, DEDUPE_STORE, AGGREGATE_STORE)
+            input.process(() -> metadataProcessor(command), DEDUPE_STORE, AGGREGATE_STORE)
                     .to(config.outputTopic(), Produced.with(Serdes.String(), Serdes.String()));
         } else {
-            input.processValues(this::transformProcessor)
+            input.processValues(() -> transformProcessor(command))
                     .to(config.outputTopic(), Produced.with(Serdes.String(), Serdes.String()));
         }
         return builder.build();
     }
 
-    private FixedKeyProcessor<String, String, String> transformProcessor() {
+    private FixedKeyProcessor<String, String, String> transformProcessor(WorkerCommand command) {
         return new FixedKeyProcessor<>() {
             private FixedKeyProcessorContext<String, String> context;
 
@@ -73,18 +71,19 @@ final class KafkaStreamsProcessor implements ProcessorSession {
             @Override public void process(FixedKeyRecord<String, String> record) {
                 long started = System.nanoTime();
                 InputEvent input = EventCodec.readInput(record.value());
+                if (!command.runId().equals(input.runId())) return;
                 metrics.ingested(Math.max(0,
                         (System.currentTimeMillis() - input.generatedTimestamp()) * 1_000_000));
                 OutputEvent output = Workload.transform(input, System.currentTimeMillis());
-                metrics.processed(System.nanoTime() - started);
                 consumed.incrementAndGet();
                 context.forward(record.withValue(EventCodec.write(output)));
                 forwarded.incrementAndGet();
+                metrics.processed(System.nanoTime() - started);
             }
         };
     }
 
-    private Processor<String, String, String, String> metadataProcessor() {
+    private Processor<String, String, String, String> metadataProcessor(WorkerCommand command) {
         return new Processor<>() {
             private ProcessorContext<String, String> context;
             private KeyValueStore<String, String> dedupe;
@@ -97,14 +96,15 @@ final class KafkaStreamsProcessor implements ProcessorSession {
             }
 
             @Override public void process(Record<String, String> record) {
+                long started = System.nanoTime();
                 InputEvent input = EventCodec.readInput(record.value());
+                if (!command.runId().equals(input.runId())) return;
                 if (input.sequenceNumber() < 0) {
                     publishAggregates(record.timestamp());
                     return;
                 }
                 metrics.ingested(Math.max(0,
                         (System.currentTimeMillis() - input.generatedTimestamp()) * 1_000_000));
-                long started = System.nanoTime();
                 consumed.incrementAndGet();
                 if (!input.eventId().equals(dedupe.get(input.key()))) {
                     dedupe.put(input.key(), input.eventId());
@@ -118,6 +118,7 @@ final class KafkaStreamsProcessor implements ProcessorSession {
             }
 
             private void publishAggregates(long timestamp) {
+                long started = System.nanoTime();
                 ArrayList<String> publishedKeys = new ArrayList<>();
                 try (KeyValueIterator<String, String> iterator = aggregates.all()) {
                     while (iterator.hasNext()) {
@@ -129,6 +130,7 @@ final class KafkaStreamsProcessor implements ProcessorSession {
                     }
                 }
                 publishedKeys.forEach(aggregates::delete);
+                metrics.flushed(System.nanoTime() - started);
             }
         };
     }

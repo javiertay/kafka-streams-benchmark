@@ -16,7 +16,7 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 - Added concise coordinator and worker lifecycle logs for matrix/scenario progress, group readiness, generation, backlog drain, worker shutdown, report writes, validation, failures, and unambiguous final completion.
 - Fixed multi-service startup: workers now start concurrently, startup uses `BENCHMARK_TIMEOUT_SECONDS`, repeated start requests for the same run are idempotent, and partial startup failures clean up workers that already started.
 - Fixed conventional consumers with more services than partitions: a worker is ready after its first successful group poll, even when Kafka correctly assigns it no partition.
-- Added an HTML overall summary that declares whether Kafka Streams or plain Java did better by counting valid configuration wins using median total throughput; ties and excluded invalid comparisons are shown explicitly.
+- Added an HTML overall summary that declares whether Kafka Streams or plain Java did better by counting valid configuration wins using median end-to-end input throughput; ties and excluded invalid comparisons are shown explicitly.
 - Reduced the partition/service matrix to meaningful combinations only: service counts greater than requested partitions are omitted, leaving `1/1`, `3/1`, `3/3`, `6/1`, `6/3`, and `6/6` for the Compose defaults.
 - Split the two worker implementations into presentation-friendly `KafkaStreamsProcessor.java` and `TraditionalKafkaProcessor.java` files. Removed the empty `StreamsRunner`/`PlainRunner` subclasses and kept orchestration in the shared `DistributedRunner`.
 - Replaced the single local broker with a configurable one-to-three-broker plaintext KRaft cluster. Compose defaults to three active brokers; `KAFKA_BROKER_COUNT=1` or `2` leaves higher-numbered broker containers idle.
@@ -28,6 +28,9 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 - Implemented equivalent bounded in-memory metadata state in Kafka Streams task stores and plain Java maps, with Kafka Streams changelogging disabled so this is a processing benchmark rather than an unequal recovery benchmark.
 - Results now distinguish generated inputs from expected outputs; validation requires every input consumed, every expected output published/observed exactly once, and every final aggregate sequence/count to match the generator's independent expectation.
 - Fixed a conventional-consumer startup race uncovered by strict validation: the coordinator now requires group membership to remain stable before generation, preventing a late startup rebalance from replaying uncommitted benchmark input.
+- Aligned processing timing boundaries: both implementations are timed from JSON decoding through business logic and output handoff. Metadata final aggregate flushing is timed separately per partition marker.
+- Corrected stage throughput to count the intervals between first and last events, and changed headline/summary throughput to consumed inputs over total elapsed time so metadata suppression does not make low output cardinality look like low processing capacity.
+- Publishing throughput now uses the coordinator observer's monotonic clock; cross-worker ingestion and processing windows retain wall-clock boundaries so timestamps can be merged across service JVMs on the same host.
 
 # Files changed
 
@@ -38,6 +41,9 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 
 # Commands run and results
 
+- Dockerized Maven `mvn -B verify` after timing corrections — passed with 25 tests.
+- Isolated three-broker metadata timing smoke at 100 events/s for two seconds, one partition, and one service — passed for both implementations: 201 inputs consumed and all 161 expected aggregates published/observed exactly once. Results reported about 94 inputs/s end-to-end for both paths and separate metadata flush latency (30.99 ms Streams, 16.01 ms plain Java). Temporary containers, network, and override were removed.
+- Isolated three-broker transform timing smoke with the same rate, duration, partition, and service count — passed for both implementations with all 201 inputs and outputs validated. Temporary containers, network, and override were removed.
 - Final Dockerized Maven `mvn -B verify` after the stateful workload changes — passed with 19 production sources and 24 tests.
 - Three-broker/three-partition/three-service metadata smoke at 100 events/s for two seconds — passed for both implementations: 201 inputs consumed exactly once and 17 final aggregates published/observed exactly once with zero incorrect aggregate values. HTML returned HTTP 200 and showed the metadata workload, expected-output row, and strict validation status.
 - Three-broker/three-partition/three-service transform regression with the same input — passed for both implementations with 201 inputs and 201 outputs validated.
@@ -61,6 +67,7 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 - The two-broker option is structurally configured and Compose-validated but has not received a full runtime smoke test; the requested one- and three-broker comparison modes have.
 - Fixed-rate results do not yet include Kafka committed-offset lag; backlog is measured from generated versus observed run events.
 - Metadata state is intentionally volatile and Kafka Streams changelogging is disabled for parity; crash recovery and restoration behavior remain outside the benchmark.
+- Ingestion latency and merged multi-worker ingestion/processing throughput use wall-clock timestamps because events cross JVMs; local processing, flush, generation, publishing-window, and total durations use monotonic timers. Run distributed workers on clock-synchronized hosts if the topology is moved beyond one Docker host.
 
 # Next recommended steps
 

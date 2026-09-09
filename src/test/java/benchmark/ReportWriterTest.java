@@ -33,8 +33,8 @@ class ReportWriterTest {
     }
 
     @Test void summaryNamesWinnerDifferenceTieAndInvalidRun() {
-        assertEquals("Kafka Streams had 25.0% higher total throughput.", ReportWriter.winnerSummary(100, 80, true));
-        assertEquals("Plain Java had 25.0% higher total throughput.", ReportWriter.winnerSummary(80, 100, true));
+        assertEquals("Kafka Streams had 25.0% higher end-to-end input throughput.", ReportWriter.winnerSummary(100, 80, true));
+        assertEquals("Plain Java had 25.0% higher end-to-end input throughput.", ReportWriter.winnerSummary(80, 100, true));
         assertEquals("Tie at the displayed precision.", ReportWriter.winnerSummary(1.001, 1.004, true));
         assertEquals("No winner because output validation failed.", ReportWriter.winnerSummary(100, 80, false));
     }
@@ -69,6 +69,8 @@ class ReportWriterTest {
         assertTrue(html.contains("only this broker-count environment"));
         assertTrue(html.contains("Metadata deduplication"));
         assertTrue(html.contains("Expected outputs"));
+        assertTrue(html.contains("Metadata flush p99"));
+        assertTrue(html.contains("End-to-end input throughput"));
         assertEquals(2, html.split("role=\"tab\"", -1).length - 1);
         assertTrue(html.contains("Backlog at generation end"));
         assertTrue(html.contains("Catch-up time"));
@@ -84,7 +86,7 @@ class ReportWriterTest {
         return new BenchmarkResult(implementation, "2026-01-01T00:00:00Z",
                 implementation + inputRate + services, 1, 100_000, 10, 3, 3, 256, services,
                 java.util.Collections.nCopies(services, 100_000 / services), inputRate, inputRate, 0, 0, 0,
-                10, latency, 10, latency, 10, latency,
+                10, latency, 10, latency, latency, 10, latency,
                 10, totalThroughput, latency, new ResourceUsage(1, 2, 3, 4),
                 new Validation(100_000, 100_000, 100_000, 100_000, valid ? 100_000 : 99_999,
                         valid ? 0 : 1, 0, 0, 0),
