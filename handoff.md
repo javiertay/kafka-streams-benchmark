@@ -1,6 +1,6 @@
 # Current objective
 
-Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with plain Kafka consumers under sustained 100k and 1m events/second offered load, partition variations, and horizontal processor-service scaling.
+Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with plain Kafka consumers under a sustained 500k events/second offered load, partition variations, and horizontal processor-service scaling.
 
 # Completed work
 
@@ -23,17 +23,24 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 - Made benchmark topic replication default to the configured broker count, configured local minimum ISR as one for a single broker and two otherwise, and reject replication factors above the declared broker count.
 - Added a coordinator preflight that waits for exactly `KAFKA_BROKER_COUNT` registered brokers before any scenario starts.
 - Added broker count and replication factor to safe result configuration and to the HTML report header so one- and three-broker verdicts remain visibly separate.
+- Reduced the default offered-load matrix to one configurable 500k events/second target, leaving six meaningful partition/service configurations.
+- Added `BENCHMARK_PROCESSING_MODE=transform|metadata`. Compose defaults to the metadata workload, which injects deterministic duplicates, deduplicates the latest event per key, aggregates accepted updates by key and one-second logical window, and suppresses intermediate output until per-partition completion markers arrive.
+- Implemented equivalent bounded in-memory metadata state in Kafka Streams task stores and plain Java maps, with Kafka Streams changelogging disabled so this is a processing benchmark rather than an unequal recovery benchmark.
+- Results now distinguish generated inputs from expected outputs; validation requires every input consumed, every expected output published/observed exactly once, and every final aggregate sequence/count to match the generator's independent expectation.
+- Fixed a conventional-consumer startup race uncovered by strict validation: the coordinator now requires group membership to remain stable before generation, preventing a late startup rebalance from replaying uncommitted benchmark input.
 
 # Files changed
 
 - Runtime/configuration: `compose.yaml`, `src/main/java/benchmark/Config.java`, `BenchmarkOrchestrator.java`, `Main.java`
 - Distributed processing: `DistributedRunner.java`, `DistributedWorkers.java`, `ProcessorSession.java`, `WorkerServer.java`, `KafkaStreamsProcessor.java`, `TraditionalKafkaProcessor.java`, `KafkaSupport.java`
 - Measurement/reporting: `RunSupport.java`, `OutputCollector.java`, `Statistics.java`, `BenchmarkResult.java`, `ReportWriter.java`
-- Tests/docs: `ConfigTest.java`, `StatisticsTest.java`, `ReportWriterTest.java`, `README.md`, `handoff.md`
+- Shared workload/tests/docs: `Workload.java`, `ConfigTest.java`, `WorkloadTest.java`, `ValidationTest.java`, `StatisticsTest.java`, `ReportWriterTest.java`, `README.md`, `handoff.md`
 
 # Commands run and results
 
-- Dockerized Maven `mvn -B verify` after the broker-count changes — passed with 19 production sources and 22 tests.
+- Final Dockerized Maven `mvn -B verify` after the stateful workload changes — passed with 19 production sources and 24 tests.
+- Three-broker/three-partition/three-service metadata smoke at 100 events/s for two seconds — passed for both implementations: 201 inputs consumed exactly once and 17 final aggregates published/observed exactly once with zero incorrect aggregate values. HTML returned HTTP 200 and showed the metadata workload, expected-output row, and strict validation status.
+- Three-broker/three-partition/three-service transform regression with the same input — passed for both implementations with 201 inputs and 201 outputs validated.
 - `docker-compose -f compose.yaml config --quiet` — passed with both the default three-broker interpolation and `KAFKA_BROKER_COUNT=1`.
 - Three-broker Compose smoke at 1k events/s, one partition, one service, and one measured second — passed for Kafka Streams and plain Java with 1,001/1,001 outputs validated. Coordinator detected three brokers and replication factor three; topic metadata showed replicas/ISR on brokers 1, 2, and 3 and minimum ISR two; report returned HTTP 200 and named the 3-broker/RF3 environment.
 - Single-broker Compose smoke with the same workload — passed for both implementations with 1,001/1,001 outputs validated. Brokers 2 and 3 logged that they were disabled, coordinator detected one broker and replication factor one, topic metadata showed RF1/minimum ISR1, and the report named the 1-broker/RF1 environment.
@@ -48,11 +55,12 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 
 # Known issues / unverified
 
-- The complete default 10-second × 100k/1m rates × 1/3/6 partitions × 1/3/6 services matrix has not been run; only the focused distributed smoke matrix is integration-verified.
+- The complete default 10-second × 500k rate × 1/3/6 partitions × 1/3/6 services matrix has not been run; only focused distributed smoke runs are integration-verified.
 - A run where achieved input rate is below the target does not prove consumer capacity at that target; it identifies the generator, broker, or network as the limiting path.
 - No SSL Kafka cluster was supplied, so SSL integration remains unverified.
 - The two-broker option is structurally configured and Compose-validated but has not received a full runtime smoke test; the requested one- and three-broker comparison modes have.
 - Fixed-rate results do not yet include Kafka committed-offset lag; backlog is measured from generated versus observed run events.
+- Metadata state is intentionally volatile and Kafka Streams changelogging is disabled for parity; crash recovery and restoration behavior remain outside the benchmark.
 
 # Next recommended steps
 

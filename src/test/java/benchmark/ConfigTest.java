@@ -112,4 +112,16 @@ class ConfigTest {
                 "KAFKA_BROKER_COUNT", "2",
                 "BENCHMARK_REPLICATION_FACTOR", "3")));
     }
+
+    @Test void parsesAndValidatesProcessingMode() {
+        Config metadata = Config.from(Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
+                "BENCHMARK_PROCESSING_MODE", "metadata"));
+        assertEquals(ProcessingMode.METADATA, metadata.processingMode());
+        assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
+                "BENCHMARK_PROCESSING_MODE", "unknown")));
+    }
 }

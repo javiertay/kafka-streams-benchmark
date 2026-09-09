@@ -7,7 +7,10 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.errors.WakeupException;
 
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -18,14 +21,18 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
     private final AtomicInteger published = new AtomicInteger();
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final StageMetrics metrics;
+    private final Config config;
     private final ResourceSampler resources = new ResourceSampler();
     private final long initialGcCount = ResourceSampler.gcCount();
     private final long initialGcTime = ResourceSampler.gcTime();
     private final KafkaProducer<String, String> producer;
     private final KafkaConsumer<String, String> consumer;
     private final Thread consumerThread;
+    private final Map<String, String> lastEventIds = new HashMap<>();
+    private final Map<String, OutputEvent> aggregates = new HashMap<>();
 
     TraditionalKafkaProcessor(Config config, WorkerCommand command, StageMetrics metrics) throws Exception {
+        this.config = config;
         this.metrics = metrics;
         producer = KafkaSupport.producer(config);
         consumer = KafkaSupport.consumer(config, command.groupId());
@@ -59,12 +66,42 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
             return;
         }
         if (!command.runId().equals(input.runId())) return;
+        if (config.processingMode() == ProcessingMode.METADATA && input.sequenceNumber() < 0) {
+            publishAggregates(record.partition());
+            return;
+        }
 
-        metrics.ingested(Math.max(0, (System.currentTimeMillis() - record.timestamp()) * 1_000_000));
+        metrics.ingested(Math.max(0,
+                (System.currentTimeMillis() - input.generatedTimestamp()) * 1_000_000));
         long started = System.nanoTime();
+        consumed.incrementAndGet();
+        if (config.processingMode() == ProcessingMode.METADATA) {
+            if (!input.eventId().equals(lastEventIds.put(input.key(), input.eventId()))) {
+                String aggregateKey = Workload.aggregateStateKey(
+                        record.partition(), record.timestamp(), input.key());
+                aggregates.put(aggregateKey, Workload.aggregate(
+                        input, aggregates.get(aggregateKey), System.currentTimeMillis()));
+            }
+            metrics.processed(System.nanoTime() - started);
+            return;
+        }
         OutputEvent output = Workload.transform(input, System.currentTimeMillis());
         metrics.processed(System.nanoTime() - started);
-        consumed.incrementAndGet();
+        publish(output);
+    }
+
+    private void publishAggregates(int partition) {
+        String prefix = partition + ":";
+        Iterator<Map.Entry<String, OutputEvent>> iterator = aggregates.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, OutputEvent> aggregate = iterator.next();
+            if (!aggregate.getKey().startsWith(prefix)) continue;
+            publish(aggregate.getValue());
+            iterator.remove();
+        }
+    }
+
+    private void publish(OutputEvent output) {
         producer.send(new ProducerRecord<>(config.outputTopic(), output.key(), EventCodec.write(output)),
                 (metadata, error) -> {
                     if (error == null) published.incrementAndGet();

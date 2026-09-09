@@ -38,31 +38,34 @@ final class DistributedRunner {
             System.out.printf("%s READY: all workers joined; generating for %ds at %,d events/s%n",
                     prefix, measurementSeconds, inputRate);
             Generation generation = RunSupport.generate(config, runId, measurementSeconds, inputRate, seed,
-                    collector::observed);
-            int backlogAtGenerationEnd = Math.max(0, generation.sent() - generation.observedAtWindowEnd());
+                    actualPartitions, collector::observed);
+            int backlogAtGenerationEnd = Math.max(0,
+                    generation.expectedOutputs() - generation.observedAtWindowEnd());
             System.out.printf("%s Generation window complete: %,d sent, %,.0f events/s achieved, "
-                            + "%,d backlog, producer flush %.2fs%n",
-                    prefix, generation.sent(), generation.achievedRate(), backlogAtGenerationEnd,
+                            + "%,d expected outputs, %,d backlog, producer flush %.2fs%n",
+                    prefix, generation.sent(), generation.achievedRate(), generation.expectedOutputs(),
+                    backlogAtGenerationEnd,
                     generation.producerFlushSeconds());
-            collector.expect(generation.sent());
+            collector.expect(generation.expectedOutputs(), generation.expectedAggregates());
             System.out.printf("%s Draining output: %,d/%,d observed (timeout %ds)%n",
-                    prefix, collector.observed(), generation.sent(), config.timeoutSeconds());
+                    prefix, collector.observed(), generation.expectedOutputs(), config.timeoutSeconds());
             boolean completed = collector.await(Duration.ofSeconds(config.timeoutSeconds()));
             long finished = System.nanoTime();
             double catchUpSeconds = Math.max(0,
                     (finished - generation.windowEndedNanos()) / 1_000_000_000.0);
             if (completed) {
                 System.out.printf("%s Drain complete: %,d/%,d observed, catch-up %.2fs%n",
-                        prefix, collector.observed(), generation.sent(), catchUpSeconds);
+                        prefix, collector.observed(), generation.expectedOutputs(), catchUpSeconds);
             } else {
                 System.err.printf("%s TIMEOUT: %,d/%,d observed after %ds%n",
-                        prefix, collector.observed(), generation.sent(), config.timeoutSeconds());
+                        prefix, collector.observed(), generation.expectedOutputs(), config.timeoutSeconds());
             }
             System.out.printf("%s Stopping workers and collecting service metrics%n", prefix);
             List<ProcessorReport> reports = workers.stop();
             reports.forEach(report -> metrics.merge(report.metrics()));
             ProcessorReport aggregate = ProcessorReport.combine(reports);
-            Validation validation = collector.validation(generation.sent(), aggregate.consumed(), aggregate.published());
+            Validation validation = collector.validation(
+                    generation.sent(), aggregate.consumed(), aggregate.published());
             BenchmarkResult result = RunSupport.result(config, implementation, runId, iteration, measurementSeconds,
                     requestedPartitions, actualPartitions, serviceInstances,
                     reports.stream().map(ProcessorReport::consumed).toList(), inputRate, generation,

@@ -15,6 +15,8 @@ final class BenchmarkOrchestrator {
         KafkaSupport.awaitBrokerCount(config);
         System.out.printf("[benchmark] Kafka cluster ready: %d broker%s, replication factor %d%n",
                 config.brokerCount(), config.brokerCount() == 1 ? "" : "s", config.replicationFactor());
+        System.out.printf("[benchmark] Processing mode: %s%n",
+                config.processingMode().name().toLowerCase(java.util.Locale.ROOT));
         int totalScenarios = config.inputRates().size() * config.partitions().stream()
                 .mapToInt(partitions -> (int) config.serviceInstances().stream()
                         .filter(services -> isMeaningfulScalingScenario(partitions, services)).count())

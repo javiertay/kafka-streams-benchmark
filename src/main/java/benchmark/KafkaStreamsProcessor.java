@@ -1,6 +1,7 @@
 package benchmark;
 
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.Topology;
@@ -9,13 +10,22 @@ import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.processor.api.FixedKeyProcessor;
 import org.apache.kafka.streams.processor.api.FixedKeyProcessorContext;
 import org.apache.kafka.streams.processor.api.FixedKeyRecord;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
+import org.apache.kafka.streams.processor.api.Record;
+import org.apache.kafka.streams.state.KeyValueIterator;
+import org.apache.kafka.streams.state.KeyValueStore;
+import org.apache.kafka.streams.state.Stores;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 final class KafkaStreamsProcessor implements ProcessorSession {
+    private static final String DEDUPE_STORE = "metadata-dedup";
+    private static final String AGGREGATE_STORE = "metadata-aggregates";
     private final AtomicInteger consumed = new AtomicInteger();
     private final AtomicInteger forwarded = new AtomicInteger();
     private final StageMetrics metrics;
@@ -33,14 +43,26 @@ final class KafkaStreamsProcessor implements ProcessorSession {
 
     private Topology buildTopology(Config config, WorkerCommand command) {
         StreamsBuilder builder = new StreamsBuilder();
-        builder.stream(config.inputTopic(), Consumed.with(Serdes.String(), Serdes.String()))
-                .filter((key, value) -> value != null && value.contains("\"runId\":\"" + command.runId() + "\""))
-                .processValues(this::processor)
-                .to(config.outputTopic(), Produced.with(Serdes.String(), Serdes.String()));
+        var input = builder.stream(config.inputTopic(), Consumed.with(Serdes.String(), Serdes.String()))
+                .filter((key, value) -> value != null
+                        && value.contains("\"runId\":\"" + command.runId() + "\""));
+        if (config.processingMode() == ProcessingMode.METADATA) {
+            builder.addStateStore(Stores.keyValueStoreBuilder(
+                    Stores.inMemoryKeyValueStore(DEDUPE_STORE), Serdes.String(), Serdes.String())
+                    .withLoggingDisabled());
+            builder.addStateStore(Stores.keyValueStoreBuilder(
+                    Stores.inMemoryKeyValueStore(AGGREGATE_STORE), Serdes.String(), Serdes.String())
+                    .withLoggingDisabled());
+            input.process(this::metadataProcessor, DEDUPE_STORE, AGGREGATE_STORE)
+                    .to(config.outputTopic(), Produced.with(Serdes.String(), Serdes.String()));
+        } else {
+            input.processValues(this::transformProcessor)
+                    .to(config.outputTopic(), Produced.with(Serdes.String(), Serdes.String()));
+        }
         return builder.build();
     }
 
-    private FixedKeyProcessor<String, String, String> processor() {
+    private FixedKeyProcessor<String, String, String> transformProcessor() {
         return new FixedKeyProcessor<>() {
             private FixedKeyProcessorContext<String, String> context;
 
@@ -49,14 +71,64 @@ final class KafkaStreamsProcessor implements ProcessorSession {
             }
 
             @Override public void process(FixedKeyRecord<String, String> record) {
-                metrics.ingested(Math.max(0, (System.currentTimeMillis() - record.timestamp()) * 1_000_000));
                 long started = System.nanoTime();
-                OutputEvent output = Workload.transform(
-                        EventCodec.readInput(record.value()), System.currentTimeMillis());
+                InputEvent input = EventCodec.readInput(record.value());
+                metrics.ingested(Math.max(0,
+                        (System.currentTimeMillis() - input.generatedTimestamp()) * 1_000_000));
+                OutputEvent output = Workload.transform(input, System.currentTimeMillis());
                 metrics.processed(System.nanoTime() - started);
                 consumed.incrementAndGet();
                 context.forward(record.withValue(EventCodec.write(output)));
                 forwarded.incrementAndGet();
+            }
+        };
+    }
+
+    private Processor<String, String, String, String> metadataProcessor() {
+        return new Processor<>() {
+            private ProcessorContext<String, String> context;
+            private KeyValueStore<String, String> dedupe;
+            private KeyValueStore<String, String> aggregates;
+
+            @Override public void init(ProcessorContext<String, String> context) {
+                this.context = context;
+                dedupe = context.getStateStore(DEDUPE_STORE);
+                aggregates = context.getStateStore(AGGREGATE_STORE);
+            }
+
+            @Override public void process(Record<String, String> record) {
+                InputEvent input = EventCodec.readInput(record.value());
+                if (input.sequenceNumber() < 0) {
+                    publishAggregates(record.timestamp());
+                    return;
+                }
+                metrics.ingested(Math.max(0,
+                        (System.currentTimeMillis() - input.generatedTimestamp()) * 1_000_000));
+                long started = System.nanoTime();
+                consumed.incrementAndGet();
+                if (!input.eventId().equals(dedupe.get(input.key()))) {
+                    dedupe.put(input.key(), input.eventId());
+                    String aggregateKey = Workload.aggregateKey(record.timestamp(), input.key());
+                    String previousValue = aggregates.get(aggregateKey);
+                    OutputEvent previous = previousValue == null ? null : EventCodec.readOutput(previousValue);
+                    aggregates.put(aggregateKey, EventCodec.write(
+                            Workload.aggregate(input, previous, System.currentTimeMillis())));
+                }
+                metrics.processed(System.nanoTime() - started);
+            }
+
+            private void publishAggregates(long timestamp) {
+                ArrayList<String> publishedKeys = new ArrayList<>();
+                try (KeyValueIterator<String, String> iterator = aggregates.all()) {
+                    while (iterator.hasNext()) {
+                        KeyValue<String, String> aggregate = iterator.next();
+                        OutputEvent output = EventCodec.readOutput(aggregate.value);
+                        context.forward(new Record<>(output.key(), aggregate.value, timestamp));
+                        forwarded.incrementAndGet();
+                        publishedKeys.add(aggregate.key);
+                    }
+                }
+                publishedKeys.forEach(aggregates::delete);
             }
         };
     }

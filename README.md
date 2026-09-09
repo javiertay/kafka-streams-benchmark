@@ -12,12 +12,12 @@ The benchmark asks: with the same Java runtime, Kafka cluster, deterministic JSO
 ## What it measures
 
 - **Ingestion throughput and p50/p95/p99 latency:** receiving records from Kafka.
-- **Processing throughput and p50/p95/p99 latency:** JSON decoding, a deterministic hash-like transformation, output construction, and JSON encoding.
+- **Processing throughput and p50/p95/p99 latency:** JSON decoding plus either a deterministic transform or metadata deduplication and aggregation.
 - **Publishing throughput and p50/p95/p99 latency:** time from processing completion until the output observer receives the record. This is publish-to-observe latency, not asynchronous API submission time. Kafka Streams does not expose per-record producer callbacks, so this definition is used for both implementations.
 - **Total elapsed time and throughput:** processor start until all expected outputs are observed.
 - **End-to-end p50/p95/p99 latency:** input generation through output observation.
 - **Offered versus achieved input rate:** whether the independent generator can deliver the requested load for the configured measurement window.
-- **Backlog and catch-up time:** how many generated events remain unobserved when the measurement window closes, and how long processors need to drain them.
+- **Backlog and catch-up time:** how many expected outputs remain unobserved when the measurement window closes, and how long processors need to publish them.
 - **Average/peak CPU and RAM:** aggregate samples across processor service JVMs only; generator and observer resources are excluded.
 - **Technical details:** Java/Kafka versions, GC, heap limit, JVM flags, GC activity, and safe client settings.
 
@@ -45,16 +45,17 @@ The cluster defaults to three active brokers and replication factor three. Set `
 The local defaults run a load matrix with:
 
 - a 10-second measured load window per run;
-- requested input rates of 100,000 and 1,000,000 events/second;
+- a requested input rate of 500,000 events/second;
+- the `metadata` processing mode, which deduplicates, aggregates, and suppresses intermediate output;
 - 1, 3, and 6 partitions;
 - 1, 3, and 6 processor service instances; and
 - a 1-second warm-up followed by one measured iteration.
 
-Only service counts that can receive partitions are run. The default partition/service pairs are therefore `1/1`, `3/1`, `3/3`, `6/1`, `6/3`, and `6/6`, producing 12 configurations across the two input rates instead of the redundant 18-configuration cross-product. For Kafka Streams, each active worker starts one Kafka Streams instance with one stream thread and all workers share the same `application.id`. For plain Java, each active worker owns one `KafkaConsumer` and producer and all consumers share the same group ID. Kafka distributes partitions across separate services rather than threads in one JVM.
+Only service counts that can receive partitions are run. The default partition/service pairs are therefore `1/1`, `3/1`, `3/3`, `6/1`, `6/3`, and `6/6`, producing six configurations at the default input rate. For Kafka Streams, each active worker starts one Kafka Streams instance with one stream thread and all workers share the same `application.id`. For plain Java, each active worker owns one `KafkaConsumer` and producer and all consumers share the same group ID. Kafka distributes partitions across separate services rather than threads in one JVM.
 
-Processors and the output observer start first. The coordinator waits for Kafka to report the expected consumer-group membership, then produces for exactly `BENCHMARK_MEASUREMENT_SECONDS`. It does not force a preset event count. Achieved input rate is the number of records submitted during that window divided by its actual duration. The final producer flush is timed separately, and backlog is captured at the window boundary before that flush can hide consumer delay.
+Processors and the output observer start first. The coordinator waits for Kafka to report stable consumer-group membership, then produces for exactly `BENCHMARK_MEASUREMENT_SECONDS`. It does not force a preset event count. Achieved input rate is the number of records submitted during that window divided by its actual duration. The final producer flush is timed separately, and backlog is captured at the window boundary before metadata completion markers can release suppressed output.
 
-At the local 10-second default, the theoretical counts are one million events at 100k/s and ten million at 1m/s. If the generator reaches only 350k/s during the 1m/s scenario, the result reports roughly 3.5 million generated events and 350k/s rather than taking longer to force ten million records through. This distinguishes an unattained offered-load target from consumer performance.
+At the local 10-second default, the theoretical count is five million events at 500k/s. If the generator reaches only 350k/s, the result reports roughly 3.5 million generated events and 350k/s rather than taking longer to force five million records through. This distinguishes an unattained offered-load target from consumer performance.
 
 Start the default three-broker environment:
 
@@ -82,14 +83,15 @@ Wait for the benchmark log to print `[server] READY: benchmark complete; results
 Coordinator logs use explicit lifecycle markers and scenario counters. A run is not finished merely because generation has stopped: the processors may still be draining a backlog. For example:
 
 ```text
-[benchmark] Starting matrix: 12 scenarios, 2 implementations, 1 measured iteration, 10s measurement, 1s warm-up
-[scenario 4/12] Starting: 10s, 3 partitions, 3 services, 100,000 events/s
-[Kafka Streams][iteration 1] READY: all workers joined; generating for 10s at 100,000 events/s
-[Kafka Streams][iteration 1] Generation window complete: 1,000,000 sent, 100,000 events/s achieved, 12,345 backlog, producer flush 0.08s
-[Kafka Streams][iteration 1] Draining output: 987,655/1,000,000 observed (timeout 600s)
-[Kafka Streams][iteration 1] Drain complete: 1,000,000/1,000,000 observed, catch-up 1.42s
-[Kafka Streams][iteration 1] COMPLETED: consumed per service [333200, 333400, 333400], validation passed, elapsed 11.7s
-[scenario 4/12] COMPLETED in 24.1s
+[benchmark] Processing mode: metadata
+[benchmark] Starting matrix: 6 scenarios, 2 implementations, 1 measured iteration, 10s measurement, 1s warm-up
+[scenario 4/6] Starting: 10s, 6 partitions, 1 service, 500,000 events/s
+[Kafka Streams][iteration 1] READY: all workers joined; generating for 10s at 500,000 events/s
+[Kafka Streams][iteration 1] Generation window complete: 5,000,000 sent, 500,000 events/s achieved, 10,000 expected outputs, 10,000 backlog, producer flush 0.08s
+[Kafka Streams][iteration 1] Draining output: 0/10,000 observed (timeout 600s)
+[Kafka Streams][iteration 1] Drain complete: 10,000/10,000 observed, catch-up 1.42s
+[Kafka Streams][iteration 1] COMPLETED: consumed per service [5000000], validation passed, elapsed 11.7s
+[scenario 4/6] COMPLETED in 24.1s
 ```
 
 `[benchmark] COMPLETED` means the whole matrix was processed. `[server] READY: benchmark complete` is the final success marker and means the completed report is available. A `[benchmark] FAILED` or per-run `TIMEOUT`/`INVALID` marker means the report should be inspected as a failed or invalid benchmark rather than a valid comparison. Worker-container logs separately show `STARTING`, `RUNNING`, `STOPPING`, and `STOPPED` for each assigned run. No per-record logs are emitted because they would distort the benchmark.
@@ -118,10 +120,11 @@ docker run --rm \
   -e KAFKA_SECURITY_PROTOCOL=SSL \
   -e KAFKA_TRUSTSTORE_LOCATION=/certs/kafka.truststore.jks \
   -e KAFKA_TRUSTSTORE_PASSWORD=changeit \
-  -e BENCHMARK_INPUT_RATES=100000,1000000 \
+  -e BENCHMARK_INPUT_RATES=500000 \
   -e BENCHMARK_MEASUREMENT_SECONDS=30 \
   -e BENCHMARK_PARTITIONS=1,3,6,12 \
   -e BENCHMARK_PAYLOAD_BYTES=1024 \
+  -e BENCHMARK_PROCESSING_MODE=metadata \
   -e BENCHMARK_SERVICE_INSTANCES=1 \
   -e BENCHMARK_WORKER_URLS=http://benchmark-worker-1:8080 \
   -e BENCHMARK_REPLICATION_FACTOR=3 \
@@ -150,6 +153,7 @@ The `/app/results` volume is optional. Omit `-v ./benchmark-results:/app/results
 | `BENCHMARK_OUTPUT_TOPIC` | `benchmark-output` | Retained output topic |
 | `BENCHMARK_PARTITIONS` | `1,3,6,12` | Strictly ascending partition scenarios |
 | `BENCHMARK_PAYLOAD_BYTES` | `1024` | Random source bytes before Base64 JSON encoding |
+| `BENCHMARK_PROCESSING_MODE` | `transform` | `transform` for one input/one output, or `metadata` for deduplication, one-second aggregation, and final-only output; Compose defaults to `metadata` |
 | `BENCHMARK_UNIQUE_KEYS` | `1000` | Number of repeatable keys |
 | `BENCHMARK_SERVICE_INSTANCES` | `1` | Comma-separated processor service/container counts; values greater than a scenario's requested partitions are omitted |
 | `BENCHMARK_WORKER_URLS` | none | Comma-separated worker base URLs; at least the largest requested service count is required |
@@ -157,7 +161,7 @@ The `/app/results` volume is optional. Omit `-v ./benchmark-results:/app/results
 | `BENCHMARK_WARMUP_SECONDS` | `2` | Unreported fixed-duration warm-up per implementation and scenario; `0` disables it |
 | `BENCHMARK_MEASUREMENT_SECONDS` | `30` | Fixed offered-load window used to derive the maximum possible event count |
 | `BENCHMARK_ITERATIONS` | `3` | Measured iterations; median is primary |
-| `BENCHMARK_INPUT_RATES` | `100000,1000000` | Comma-separated positive offered-load targets in events/sec |
+| `BENCHMARK_INPUT_RATES` | `500000` | Comma-separated positive offered-load targets in events/sec |
 | `BENCHMARK_REPLICATION_FACTOR` | `KAFKA_BROKER_COUNT` | Replication factor for newly created topics; cannot exceed the configured broker count |
 | `BENCHMARK_TIMEOUT_SECONDS` | `600` | Per-run completion timeout |
 | `BENCHMARK_HTTP_PORT` | `8080` | Report server port |
@@ -168,9 +172,27 @@ The `/app/results` volume is optional. Omit `-v ./benchmark-results:/app/results
 
 `KAFKA_SECURITY_PROTOCOL` is shared by the admin client, workload producer, output observer, Kafka Streams, and conventional clients. Truststore settings are validated only for `SSL` and `SASL_SSL`. For example, `KAFKA_PROPERTY_SSL_TRUSTSTORE_TYPE=PKCS12` supplies `ssl.truststore.type=PKCS12`. Extra properties can configure SASL, hostname verification, or mutual TLS, but secrets supplied this way should be treated as environment secrets. They are not copied into result files.
 
+## Processing modes
+
+`BENCHMARK_PROCESSING_MODE=transform` preserves the original framework-overhead baseline: every generated input is deserialized, transformed, and published as exactly one output.
+
+`BENCHMARK_PROCESSING_MODE=metadata` models a stateful metadata processor:
+
+1. Every fifth generated input repeats the preceding event ID, key, and payload, producing a deterministic 20% duplicate pattern.
+2. The processor remembers the latest event ID for each metadata key and discards the repeated update.
+3. Accepted updates are counted by metadata key in one-second logical event-time windows.
+4. Intermediate counts are suppressed.
+5. After generation, one completion marker per partition releases one final aggregate for each non-empty key/window.
+
+The expected output count and each aggregate value are calculated independently from the records actually generated. At 500k inputs/second with 1,000 keys, metadata mode normally produces about 1,000 final aggregates per one-second window rather than 500,000 outputs/second. A valid result requires both implementations to consume every input and publish and observe every expected aggregate with the correct final count exactly once.
+
+Both implementations deliberately use bounded, in-memory, per-run state for this performance comparison: Kafka Streams uses task-local state stores with changelogging disabled, and plain Java uses maps. This compares equivalent business processing without charging only one side for durable state recovery. It is not a failover or recovery benchmark.
+
+Compose applies the selected mode to the coordinator and every worker. It defaults to metadata mode; set `BENCHMARK_PROCESSING_MODE=transform` in the shell before `docker compose up --build` to rerun the original baseline.
+
 ## How Kafka Streams consumes and publishes
 
-The complete implementation is in `KafkaStreamsProcessor`. Its `buildTopology` method shows the Kafka Streams DSL from input topic to output topic, `processor` contains the per-record work, and `stop` contains shutdown and metric reporting. Shared Kafka client settings remain in `KafkaSupport.streamsProperties`.
+The complete implementation is in `KafkaStreamsProcessor`. Its `buildTopology` method selects the transform or metadata topology, `transformProcessor` contains the stateless path, and `metadataProcessor` contains task-local deduplication, aggregation, and final publication. Shared Kafka client settings remain in `KafkaSupport.streamsProperties`.
 
 ### Client configuration
 
@@ -197,17 +219,17 @@ Before input is generated, `prepareGroupAtEnd` records the current end offset fo
 benchmark-input
   → consume String key + JSON String value
   → keep only records containing this runId
-  → deserialize with Jackson
-  → execute Workload.transform
-  → serialize the OutputEvent with Jackson
+  → transform mode: deserialize → Workload.transform → one output per input
+  → metadata mode: deduplicate → aggregate by key/window → suppress intermediate counts
+  → serialize the final OutputEvent with Jackson
   → publish to benchmark-output
 ```
 
-Every active worker waits until Kafka Streams reaches `RUNNING`. The coordinator then waits for all requested members to join the application group before producing. After the timed generation window, it waits for the independent output observer to see every generated event, stops all workers, and aggregates their counters, latency samples, CPU, RAM, and GC measurements.
+Every active worker waits until Kafka Streams reaches `RUNNING`. The coordinator then requires the requested group membership to remain stable before producing. After the timed generation window, metadata completion markers release final aggregates; the coordinator waits for the independent output observer to see every expected output, stops all workers, and aggregates their counters, latency samples, CPU, RAM, and GC measurements.
 
 ## How the conventional consumer and publisher are set up
 
-The complete implementation is in `TraditionalKafkaProcessor`. Its `consume` method is the conventional poll loop, `process` contains the per-record decode/transform/send sequence, and `stop` shows consumer wake-up and producer flushing. Shared client settings remain in `KafkaSupport.consumerProperties` and `KafkaSupport.producerProperties`.
+The complete implementation is in `TraditionalKafkaProcessor`. Its `consume` method is the conventional poll loop, `process` contains the selected transform or metadata logic, and `publishAggregates` releases final per-partition aggregates. Shared client settings remain in `KafkaSupport.consumerProperties` and `KafkaSupport.producerProperties`.
 
 ### Consumer configuration
 
@@ -231,7 +253,7 @@ Each active service owns one `KafkaConsumer`, because a consumer is not thread-s
 | `enable.idempotence` | `true` | Makes retries safe from duplicate Kafka writes. |
 | SSL settings | same shared settings as Kafka Streams | Uses the same external cluster and truststore. |
 
-Each worker owns one `KafkaProducer`. For each matching record it deserializes JSON, invokes the shared `Workload.transform`, serializes the result, and calls `send`. The callback increments `published` only when Kafka reports success. Every producer is flushed before the result is finalized.
+Each worker owns one `KafkaProducer`. Transform mode invokes `Workload.transform` and sends each result. Metadata mode uses maps to apply the same latest-event deduplication and key/window count as Kafka Streams, then sends only final aggregates when that input partition's completion marker arrives. The callback increments `published` only when Kafka reports success. Every producer is flushed before the result is finalized.
 
 ### Shared output observer
 
@@ -245,9 +267,9 @@ Kafka partition counts can increase but cannot decrease. Scenarios must therefor
 
 ## Fairness and result validity
 
-Both paths use Java 25, the same image and service count, Jackson JSON, identical generation duration/rate targets, payloads and transformation, the same two topics and partition count, `acks=all`, at-least-once semantics, JVM flags, CPU/memory limits, and sequential execution. Warm-ups are excluded. Each measured iteration uses the same deterministic seed for both paths; only the run ID and timestamps differ.
+Both paths use Java 25, the same image and service count, Jackson JSON, identical generation duration/rate targets, payloads and processing mode, the same two topics and partition count, `acks=all`, at-least-once transport settings, JVM flags, CPU/memory limits, and sequential execution. Warm-ups are excluded. Each measured iteration uses the same deterministic seed for both paths; only the run ID and timestamps differ.
 
-A result is valid only when the expected number of unique outputs is observed and missing, duplicate, and unexpected counts are zero. Invalid comparisons receive no green winner highlight. Raw files include sent, consumed, submitted/forwarded, observed, missing, duplicate, and unexpected counts.
+A result is valid only when every sent input was consumed, every expected output was published and observed, and missing, duplicate, unexpected, and incorrect-aggregate counts are zero. Invalid comparisons receive no green winner highlight. Raw files include all of these validation counters.
 
 For repeated runs, the HTML selects the median iteration by total throughput and shows its metrics, plus the minimum and maximum total-throughput range. It never picks the fastest run as the headline result. Latency queues retain at most 100,000 evenly spaced samples per stage so a sustained 1m/s test does not exhaust the JVM heap.
 
@@ -271,7 +293,7 @@ With Java 25 and Maven 3.9+ installed:
 mvn verify
 ```
 
-The test suite covers deterministic generation, JSON round trips, transformation equivalence, percentiles/medians, validation, configuration, retained-topic skip decisions, HTML generation, higher/lower winner rules, ties, and invalid comparisons. Kafka integration itself requires a real SSL cluster and is intentionally not mocked.
+The test suite covers deterministic generation, JSON round trips, transform and metadata workload rules, percentiles/medians, validation, configuration, retained-topic skip decisions, HTML generation, higher/lower winner rules, ties, and invalid comparisons. Kafka integration itself requires a real cluster and is intentionally not mocked.
 
 ## Output files
 
@@ -290,4 +312,5 @@ Passwords are excluded. Mount `/app/results` to persist files after container re
 - Latency percentiles are based on at most 100,000 evenly spaced samples per stage for bounded memory use.
 - Worker control uses unauthenticated HTTP on the private container network; do not publish worker ports.
 - Retained topics accumulate benchmark records and require an external retention policy appropriate for the test environment.
+- Metadata state is intentionally volatile and changelogging is disabled for parity; crash recovery and state restoration are not measured.
 - The basic HTTP server has no authentication; expose it only on a trusted network.

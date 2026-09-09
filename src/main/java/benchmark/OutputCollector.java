@@ -5,6 +5,8 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 
 import java.time.Duration;
 import java.util.BitSet;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -14,6 +16,7 @@ final class OutputCollector implements AutoCloseable {
     private final String runId;
     private final AtomicInteger expected = new AtomicInteger(-1);
     private final StageMetrics metrics;
+    private final boolean validateAggregateValues;
     private final BitSet seen;
     private final CountDownLatch complete = new CountDownLatch(1);
     private final CountDownLatch ready = new CountDownLatch(1);
@@ -21,12 +24,15 @@ final class OutputCollector implements AutoCloseable {
     private final AtomicInteger observed = new AtomicInteger();
     private final AtomicInteger duplicates = new AtomicInteger();
     private final AtomicInteger unexpected = new AtomicInteger();
+    private final Map<Integer, Long> observedValues = new HashMap<>();
+    private Map<Integer, Long> expectedAggregates = Map.of();
     private final Thread thread;
 
     OutputCollector(Config config, String runId, StageMetrics metrics) throws InterruptedException {
         this.consumer = KafkaSupport.consumer(config, "benchmark-observer-" + runId);
         this.runId = runId;
         this.metrics = metrics;
+        this.validateAggregateValues = config.processingMode() == ProcessingMode.METADATA;
         this.seen = new BitSet();
         thread = Thread.ofPlatform().name("output-observer").start(() -> collect(config.outputTopic()));
         if (!ready.await(config.timeoutSeconds(), java.util.concurrent.TimeUnit.SECONDS)) {
@@ -55,6 +61,9 @@ final class OutputCollector implements AutoCloseable {
                     synchronized (seen) {
                         if (seen.get((int) sequence)) { duplicates.incrementAndGet(); continue; }
                         seen.set((int) sequence);
+                        if (validateAggregateValues) {
+                            observedValues.put((int) sequence, output.deterministicValue());
+                        }
                     }
                     observed.incrementAndGet();
                     long nowEpochMillis = System.currentTimeMillis();
@@ -69,13 +78,22 @@ final class OutputCollector implements AutoCloseable {
 
     boolean await(Duration timeout) throws InterruptedException { return complete.await(timeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS); }
 
-    void expect(int count) { expected.set(count); }
+    void expect(int count, Map<Integer, Long> aggregates) {
+        expectedAggregates = aggregates;
+        expected.set(count);
+    }
     int observed() { return observed.get(); }
 
     Validation validation(int sent, int consumed, int published) {
         int found = observed.get();
+        int incorrect = expectedAggregates.isEmpty() ? 0 : (int) expectedAggregates.entrySet().stream()
+                .filter(entry -> !entry.getValue().equals(observedValues.get(entry.getKey()))).count();
+        if (!expectedAggregates.isEmpty()) {
+            incorrect += (int) observedValues.keySet().stream()
+                    .filter(sequence -> !expectedAggregates.containsKey(sequence)).count();
+        }
         return new Validation(expected.get(), sent, consumed, published, found,
-                Math.max(0, expected.get() - found), duplicates.get(), unexpected.get());
+                Math.max(0, expected.get() - found), duplicates.get(), unexpected.get(), incorrect);
     }
 
     @Override public void close() {

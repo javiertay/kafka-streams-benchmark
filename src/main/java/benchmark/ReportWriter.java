@@ -61,7 +61,7 @@ final class ReportWriter {
                 <p class="muted">Green marks the better displayed value. Values that round to the same display precision are ties. Invalid runs never receive a winner.</p></header>
                 <section class="card"><h2>Overall summary</h2><p class="verdict"><strong>""" + escape(overallSummary(results)) + """
                 </strong></p><p class="muted">Each complete, valid configuration gets one vote based on median total throughput. Workloads are not averaged together.</p></section>
-                <section class="card"><h2>How to read the results</h2><p><strong>Achieved input rate:</strong> what the independent generator actually delivered during the fixed window. <strong>Backlog at generation end:</strong> events not yet observed when that window closed; near zero means the processors kept up. <strong>Catch-up time:</strong> time needed to drain that backlog. <strong>CPU/RAM:</strong> totals across processor services only; generator and observer resources are excluded.</p></section>
+                <section class="card"><h2>How to read the results</h2><p><strong>Achieved input rate:</strong> what the independent generator actually delivered during the fixed window. <strong>Expected outputs:</strong> equals generated inputs in transform mode, but is the number of final key/window aggregates in metadata mode. <strong>Backlog at generation end:</strong> expected outputs not yet observed when that window closed; near zero means the processors kept up or emitted promptly. <strong>Catch-up time:</strong> time needed to publish the remaining outputs. <strong>CPU/RAM:</strong> totals across processor services only; generator and observer resources are excluded.</p></section>
                 """ + (tabs.isEmpty() ? "" : "<nav class=\"config-tabs\" role=\"tablist\" aria-label=\"Benchmark configurations\">" + tabs + "</nav>")
                 + scenarios + (skipHtml.isEmpty() ? "" : "<section class=\"card\"><h2>Skipped scenarios</h2><ul>" + skipHtml + "</ul></section>") + """
                 <section class="card"><h2>Advanced JVM metrics</h2><p>Runtime, GC, heap, and safe Kafka configuration are available in <a href="summary.json">summary.json</a> and the per-run raw JSON files. Credentials are never written.</p>
@@ -79,6 +79,7 @@ final class ReportWriter {
         boolean valid = streamsRuns.stream().allMatch(r -> r.validation().valid()) && plainRuns.stream().allMatch(r -> r.validation().valid());
         StringBuilder rows = new StringBuilder();
         rows.append(neutralRow("Events generated", streams.eventCount(), plain.eventCount(), ""));
+        rows.append(neutralRow("Expected outputs", streams.validation().expected(), plain.validation().expected(), ""));
         rows.append(neutralRow("Achieved input rate", streams.achievedInputRate(), plain.achievedInputRate(), "/s"));
         rows.append(neutralRow("Producer flush time", streams.producerFlushSeconds(), plain.producerFlushSeconds(), " s"));
         rows.append(metricRow("Backlog at generation end", backlogPercent(streams), backlogPercent(plain), false, "%", valid));
@@ -102,7 +103,7 @@ final class ReportWriter {
         rows.append(metricRow("Peak RAM", streams.resources().peakRamMb(), plain.resources().peakRamMb(), false, " MB", valid));
         String range = String.format(Locale.ROOT, "Median of %d/%d iterations; total throughput ranges %.1f–%.1f/s vs %.1f–%.1f/s.",
                 streamsRuns.size(), plainRuns.size(), min(streamsRuns), max(streamsRuns), min(plainRuns), max(plainRuns));
-        String status = valid ? "<span class=\"valid\">Valid: all expected outputs were observed once.</span>" :
+        String status = valid ? "<span class=\"valid\">Valid: all inputs were consumed and all expected outputs were published and observed once.</span>" :
                 "<div class=\"invalid\">Invalid: output validation failed. No winner is highlighted.</div>";
         return "<section class=\"card scenario-panel\" id=\"scenario-" + index + "\" role=\"tabpanel\""
                 + (visible ? "" : " hidden") + "><h2>" + scenario.measurementSeconds() + " seconds · "
@@ -207,14 +208,25 @@ final class ReportWriter {
         Object brokers = results.getFirst().safeConfiguration().get("brokerCount");
         Object replication = results.getFirst().safeConfiguration().get("replicationFactor");
         if (!(brokers instanceof Number brokerCount) || !(replication instanceof Number replicationFactor)) return "";
+        Object processingMode = results.getFirst().safeConfiguration().get("processingMode");
         int count = brokerCount.intValue();
         return "<p class=\"lead\"><strong>Kafka environment:</strong> " + count
                 + (count == 1 ? " broker" : " brokers") + ", replication factor "
-                + replicationFactor.intValue() + ". This report contains only this broker-count environment.</p>";
+                + replicationFactor.intValue() + ". This report contains only this broker-count environment.</p>"
+                + (processingMode == null ? "" : "<p class=\"lead\"><strong>Processing workload:</strong> "
+                + workloadDescription(processingMode.toString()) + "</p>");
+    }
+    private static String workloadDescription(String mode) {
+        return "metadata".equals(mode)
+                ? "Metadata deduplication, per-key one-second aggregation, and final-only suppressed output."
+                : "One input event is transformed into one output event.";
     }
     private static String plural(int count) { return count == 1 ? "" : "s"; }
     private static String distribution(List<Integer> counts) { return counts.stream().map(ReportWriter::number).collect(java.util.stream.Collectors.joining(" / ")); }
-    private static double backlogPercent(BenchmarkResult result) { return result.eventCount() == 0 ? 0 : result.backlogAtGenerationEnd() * 100.0 / result.eventCount(); }
+    private static double backlogPercent(BenchmarkResult result) {
+        return result.validation().expected() == 0 ? 0
+                : result.backlogAtGenerationEnd() * 100.0 / result.validation().expected();
+    }
     private static String escape(String value) { return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;"); }
 
     private record Scenario(int measurementSeconds, int partitions, int actual, int serviceInstances, long inputRate) {}

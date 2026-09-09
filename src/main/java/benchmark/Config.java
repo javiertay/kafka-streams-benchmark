@@ -16,7 +16,7 @@ record Config(
         int payloadBytes, int uniqueKeys, List<Integer> serviceInstances,
         int warmupSeconds, int measurementSeconds, int iterations, List<Long> inputRates, int replicationFactor,
         int httpPort, Path resultsDir, int timeoutSeconds, String processingGuarantee,
-        List<String> workerUrls, Map<String, String> extraKafkaProperties) {
+        ProcessingMode processingMode, List<String> workerUrls, Map<String, String> extraKafkaProperties) {
 
     static Config from(Map<String, String> env) {
         String bootstrap = required(env, "KAFKA_BOOTSTRAP_SERVERS");
@@ -32,7 +32,7 @@ record Config(
         var partitions = positiveList(env.getOrDefault("BENCHMARK_PARTITIONS", "1,3,6,12"), "BENCHMARK_PARTITIONS");
         var serviceInstances = positiveList(env.getOrDefault("BENCHMARK_SERVICE_INSTANCES", "1"),
                 "BENCHMARK_SERVICE_INSTANCES");
-        var inputRates = positiveLongList(env.getOrDefault("BENCHMARK_INPUT_RATES", "100000,1000000"),
+        var inputRates = positiveLongList(env.getOrDefault("BENCHMARK_INPUT_RATES", "500000"),
                 "BENCHMARK_INPUT_RATES");
         int measurementSeconds = positiveInt(env, "BENCHMARK_MEASUREMENT_SECONDS", 30);
         int warmupSeconds = nonNegativeInt(env, "BENCHMARK_WARMUP_SECONDS", 2);
@@ -76,6 +76,7 @@ record Config(
                 Path.of(env.getOrDefault("BENCHMARK_RESULTS_DIR", "results")),
                 positiveInt(env, "BENCHMARK_TIMEOUT_SECONDS", 600),
                 env.getOrDefault("KAFKA_STREAMS_PROCESSING_GUARANTEE", "at_least_once"),
+                ProcessingMode.parse(env.getOrDefault("BENCHMARK_PROCESSING_MODE", "transform")),
                 Arrays.stream(env.getOrDefault("BENCHMARK_WORKER_URLS", "").split(","))
                         .map(String::trim).filter(value -> !value.isEmpty()).toList(), extras);
         if (usesSsl && !Files.isRegularFile(config.truststore())) {
@@ -110,6 +111,7 @@ record Config(
         safe.put("inputRateScenarios", inputRates);
         safe.put("measurementSeconds", measurementSeconds);
         safe.put("replicationFactor", replicationFactor);
+        safe.put("processingMode", processingMode.name().toLowerCase(Locale.ROOT));
         return safe;
     }
 
@@ -148,6 +150,18 @@ record Config(
             return result;
         } catch (NumberFormatException exception) {
             throw new IllegalArgumentException(name + " must be a comma-separated list of positive integers", exception);
+        }
+    }
+}
+
+enum ProcessingMode {
+    TRANSFORM, METADATA;
+
+    static ProcessingMode parse(String value) {
+        try {
+            return valueOf(value.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException("BENCHMARK_PROCESSING_MODE must be transform or metadata", exception);
         }
     }
 }

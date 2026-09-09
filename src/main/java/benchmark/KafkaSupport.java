@@ -118,10 +118,13 @@ final class KafkaSupport {
 
     static void awaitGroupMembers(Config config, String group, int expected) throws Exception {
         long deadline = System.nanoTime() + config.timeoutSeconds() * 1_000_000_000L;
+        int stableChecks = 0;
         try (AdminClient admin = AdminClient.create(config.kafkaProperties())) {
             while (System.nanoTime() < deadline) {
                 var description = admin.describeConsumerGroups(List.of(group)).all().get().get(group);
-                if (description != null && description.members().size() == expected) return;
+                if (description != null && description.members().size() == expected) stableChecks++;
+                else stableChecks = 0;
+                if (stableChecks == 4) return;
                 Thread.sleep(250);
             }
         }

@@ -3,9 +3,10 @@ package benchmark;
 import java.util.Map;
 
 record Validation(int expected, int sent, int consumed, int published, int observed,
-                  int missing, int duplicates, int unexpected) {
+                  int missing, int duplicates, int unexpected, int incorrect) {
     boolean valid() {
-        return expected == observed && missing == 0 && duplicates == 0 && unexpected == 0;
+        return sent == consumed && expected == published && expected == observed
+                && missing == 0 && duplicates == 0 && unexpected == 0 && incorrect == 0;
     }
 }
 

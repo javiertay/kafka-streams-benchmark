@@ -5,17 +5,20 @@ import org.apache.kafka.common.utils.AppInfoParser;
 
 import java.lang.management.ManagementFactory;
 import java.util.UUID;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 final class RunSupport {
     private RunSupport() {}
 
     static Generation generate(Config config, String runId, int durationSeconds, long inputRate, long seed,
-                               java.util.function.IntSupplier observed) throws Exception {
+                               int partitions, java.util.function.IntSupplier observed) throws Exception {
         long started = System.nanoTime();
         long deadline = started + durationSeconds * 1_000_000_000L;
         long interval = 1_000_000_000L / inputRate;
         AtomicReference<Exception> failure = new AtomicReference<>();
+        Map<String, long[]> expectedMetadataOutputs = new HashMap<>();
         int sequence = 0;
         try (var producer = KafkaSupport.producer(config)) {
             while (System.nanoTime() < deadline) {
@@ -26,20 +29,49 @@ final class RunSupport {
                     else Thread.onSpinWait();
                 }
                 long now = System.currentTimeMillis();
-                InputEvent event = Workload.event(runId, sequence, config.payloadBytes(), config.uniqueKeys(), seed, now);
-                producer.send(new ProducerRecord<>(config.inputTopic(), null, now, event.key(), EventCodec.write(event)),
+                long eventSequence = config.processingMode() == ProcessingMode.METADATA
+                        ? Workload.metadataSequence(sequence) : sequence;
+                InputEvent event = Workload.event(
+                        runId, eventSequence, config.payloadBytes(), config.uniqueKeys(), seed, now);
+                long eventTime = config.processingMode() == ProcessingMode.METADATA
+                        ? Workload.eventTime(eventSequence, inputRate) : now;
+                if (config.processingMode() == ProcessingMode.METADATA) {
+                    if (eventSequence == sequence) {
+                        expectedMetadataOutputs.compute(Workload.aggregateKey(eventTime, event.key()),
+                                (key, aggregate) -> new long[] {
+                                        eventSequence, aggregate == null ? 1 : aggregate[1] + 1
+                                });
+                    }
+                }
+                producer.send(new ProducerRecord<>(
+                                config.inputTopic(), null, eventTime, event.key(), EventCodec.write(event)),
                         (metadata, error) -> { if (error != null) failure.compareAndSet(null, error); });
                 sequence++;
             }
             int observedAtWindowEnd = observed.getAsInt();
             long windowEnded = System.nanoTime();
+            if (config.processingMode() == ProcessingMode.METADATA) {
+                long markerTimestamp = durationSeconds * 1_000L + Workload.AGGREGATION_WINDOW_MS;
+                for (int partition = 0; partition < partitions; partition++) {
+                    InputEvent marker = new InputEvent("marker-" + partition, runId, -1,
+                            "marker-" + partition, System.currentTimeMillis(), "");
+                    producer.send(new ProducerRecord<>(config.inputTopic(), partition, markerTimestamp,
+                                    marker.key(), EventCodec.write(marker)),
+                            (metadata, error) -> { if (error != null) failure.compareAndSet(null, error); });
+                }
+            }
             producer.flush();
             long finished = System.nanoTime();
             if (failure.get() != null) throw failure.get();
             double windowSeconds = (windowEnded - started) / 1_000_000_000.0;
-            return new Generation(sequence, windowSeconds == 0 ? 0 : sequence / windowSeconds,
+            Map<Integer, Long> expectedAggregates = new HashMap<>();
+            expectedMetadataOutputs.values().forEach(
+                    aggregate -> expectedAggregates.put((int) aggregate[0], aggregate[1]));
+            int expectedOutputs = config.processingMode() == ProcessingMode.METADATA
+                    ? expectedAggregates.size() : sequence;
+            return new Generation(sequence, expectedOutputs, windowSeconds == 0 ? 0 : sequence / windowSeconds,
                     started, windowEnded, finished, observedAtWindowEnd,
-                    (finished - windowEnded) / 1_000_000_000.0);
+                    (finished - windowEnded) / 1_000_000_000.0, Map.copyOf(expectedAggregates));
         }
     }
 
@@ -76,5 +108,7 @@ final class RunSupport {
     }
 }
 
-record Generation(int sent, double achievedRate, long startedNanos, long windowEndedNanos, long finishedNanos,
-                  int observedAtWindowEnd, double producerFlushSeconds) {}
+record Generation(int sent, int expectedOutputs, double achievedRate,
+                  long startedNanos, long windowEndedNanos, long finishedNanos,
+                  int observedAtWindowEnd, double producerFlushSeconds,
+                  Map<Integer, Long> expectedAggregates) {}

@@ -19,4 +19,17 @@ class WorkloadTest {
         assertEquals(first, second);
         assertEquals(first, EventCodec.readOutput(EventCodec.write(first)));
     }
+
+    @Test void metadataWorkloadDuplicatesEveryFifthEventAndAggregatesCounts() {
+        assertEquals(4, Workload.metadataSequence(4));
+        assertEquals(4, Workload.metadataSequence(5));
+        assertEquals(6, Workload.metadataSequence(6));
+        assertEquals("2:key-7", Workload.aggregateKey(2_500, "key-7"));
+
+        InputEvent input = Workload.event("run", 4, 4, 10, 42, 100);
+        OutputEvent first = Workload.aggregate(input, null, 200);
+        OutputEvent second = Workload.aggregate(input, first, 300);
+        assertEquals(1, first.deterministicValue());
+        assertEquals(2, second.deterministicValue());
+    }
 }
