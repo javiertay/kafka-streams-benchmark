@@ -8,7 +8,6 @@ import org.apache.kafka.common.errors.WakeupException;
 
 import java.time.Duration;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -28,8 +27,9 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
     private final KafkaProducer<String, String> producer;
     private final KafkaConsumer<String, String> consumer;
     private final Thread consumerThread;
-    private final Map<String, String> lastEventIds = new HashMap<>();
-    private final Map<String, String> aggregates = new HashMap<>();
+    private final Map<Long, Workload.WindowAccumulator> windows = new HashMap<>();
+    private final Map<Long, Workload.WindowAccumulator> globalWindows = new HashMap<>();
+    private final Map<Long, Integer> receivedParts = new HashMap<>();
 
     TraditionalKafkaProcessor(Config config, WorkerCommand command, StageMetrics metrics) throws Exception {
         this.config = config;
@@ -44,13 +44,17 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
     }
 
     private void consume(Config config, WorkerCommand command, CountDownLatch ready) {
-        consumer.subscribe(List.of(config.inputTopic()));
+        consumer.subscribe(config.processingMode() == ProcessingMode.METADATA
+                ? List.of(config.inputTopic(), config.partialTopic()) : List.of(config.inputTopic()));
         long nextCommit = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(KafkaSupport.COMMIT_INTERVAL_MS);
         try {
             while (running.get()) {
                 var records = consumer.poll(Duration.ofMillis(250));
                 ready.countDown();
-                for (ConsumerRecord<String, String> record : records) process(config, command, record);
+                for (ConsumerRecord<String, String> record : records) {
+                    if (record.topic().equals(config.partialTopic())) processPartial(config, command, record);
+                    else process(config, command, record);
+                }
                 if (!records.isEmpty() && System.nanoTime() >= nextCommit) {
                     producer.flush();
                     consumer.commitSync();
@@ -74,21 +78,14 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
         }
         if (!command.runId().equals(input.runId())) return;
         if (config.processingMode() == ProcessingMode.METADATA && input.sequenceNumber() < 0) {
-            publishAggregates(record.partition());
+            publishPartial(command, input.windowIndex(), record.partition());
             return;
         }
 
         metrics.ingested();
         consumed.incrementAndGet();
         if (config.processingMode() == ProcessingMode.METADATA) {
-            if (!input.eventId().equals(lastEventIds.put(input.key(), input.eventId()))) {
-                String aggregateKey = Workload.aggregateStateKey(
-                        record.partition(), record.timestamp(), input.key());
-                String previousValue = aggregates.get(aggregateKey);
-                OutputEvent previous = previousValue == null ? null : EventCodec.readOutput(previousValue);
-                aggregates.put(aggregateKey, EventCodec.write(Workload.aggregate(
-                        input, previous, System.currentTimeMillis())));
-            }
+            windows.computeIfAbsent(input.windowIndex(), ignored -> new Workload.WindowAccumulator()).add(input);
             metrics.processed(System.nanoTime() - started);
             return;
         }
@@ -97,18 +94,28 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
         metrics.processed(System.nanoTime() - started);
     }
 
-    private void publishAggregates(int partition) {
+    private void publishPartial(WorkerCommand command, long window, int partition) {
         long started = System.nanoTime();
-        String prefix = partition + ":";
-        Iterator<Map.Entry<String, String>> iterator = aggregates.entrySet().iterator();
-        while (iterator.hasNext()) {
-            Map.Entry<String, String> aggregate = iterator.next();
-            if (!aggregate.getKey().startsWith(prefix)) continue;
-            OutputEvent output = EventCodec.readOutput(aggregate.getValue());
-            publishSerialized(output.key(), aggregate.getValue());
-            iterator.remove();
-        }
+        Workload.WindowAccumulator aggregate = windows.remove(window);
+        if (aggregate == null) aggregate = new Workload.WindowAccumulator();
+        PartialAggregate partial = aggregate.partial(command.runId(), window, partition);
+        producer.send(new ProducerRecord<>(config.partialTopic(), Long.toString(window), EventCodec.write(partial)));
         metrics.flushed(System.nanoTime() - started);
+    }
+
+    private void processPartial(Config config, WorkerCommand command, ConsumerRecord<String, String> record) {
+        PartialAggregate partial;
+        try { partial = EventCodec.readPartial(record.value()); }
+        catch (IllegalArgumentException ignored) { return; }
+        if (!command.runId().equals(partial.runId())) return;
+        globalWindows.computeIfAbsent(partial.windowIndex(), ignored -> new Workload.WindowAccumulator()).merge(partial);
+        if (receivedParts.merge(partial.windowIndex(), 1, Integer::sum) == command.inputPartitions()) {
+            OutputEvent output = globalWindows.remove(partial.windowIndex()).output(command.runId(),
+                    partial.windowIndex(), config.outputIntervalSeconds(), command.durationSeconds(),
+                    System.currentTimeMillis());
+            receivedParts.remove(partial.windowIndex());
+            publish(output);
+        }
     }
 
     private void publish(OutputEvent output) {

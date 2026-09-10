@@ -1,7 +1,6 @@
 package benchmark;
 
 import org.apache.kafka.common.serialization.Serdes;
-import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.Topology;
@@ -13,19 +12,15 @@ import org.apache.kafka.streams.processor.api.FixedKeyRecord;
 import org.apache.kafka.streams.processor.api.Processor;
 import org.apache.kafka.streams.processor.api.ProcessorContext;
 import org.apache.kafka.streams.processor.api.Record;
-import org.apache.kafka.streams.state.KeyValueIterator;
-import org.apache.kafka.streams.state.KeyValueStore;
-import org.apache.kafka.streams.state.Stores;
 
 import java.time.Duration;
-import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 final class KafkaStreamsProcessor implements ProcessorSession {
-    private static final String DEDUPE_STORE = "metadata-dedup";
-    private static final String AGGREGATE_STORE = "metadata-aggregates";
     private final AtomicInteger consumed = new AtomicInteger();
     private final AtomicInteger forwarded = new AtomicInteger();
     private final StageMetrics metrics;
@@ -45,13 +40,10 @@ final class KafkaStreamsProcessor implements ProcessorSession {
         StreamsBuilder builder = new StreamsBuilder();
         var input = builder.stream(config.inputTopic(), Consumed.with(Serdes.String(), Serdes.String()));
         if (config.processingMode() == ProcessingMode.METADATA) {
-            builder.addStateStore(Stores.keyValueStoreBuilder(
-                    Stores.inMemoryKeyValueStore(DEDUPE_STORE), Serdes.String(), Serdes.String())
-                    .withLoggingDisabled());
-            builder.addStateStore(Stores.keyValueStoreBuilder(
-                    Stores.inMemoryKeyValueStore(AGGREGATE_STORE), Serdes.String(), Serdes.String())
-                    .withLoggingDisabled());
-            input.process(() -> metadataProcessor(command), DEDUPE_STORE, AGGREGATE_STORE)
+            input.process(() -> metadataPartialProcessor(command))
+                    .to(config.partialTopic(), Produced.with(Serdes.String(), Serdes.String()));
+            builder.stream(config.partialTopic(), Consumed.with(Serdes.String(), Serdes.String()))
+                    .process(() -> metadataGlobalProcessor(config, command))
                     .to(config.outputTopic(), Produced.with(Serdes.String(), Serdes.String()));
         } else {
             input.processValues(() -> transformProcessor(command))
@@ -82,16 +74,13 @@ final class KafkaStreamsProcessor implements ProcessorSession {
         };
     }
 
-    private Processor<String, String, String, String> metadataProcessor(WorkerCommand command) {
+    private Processor<String, String, String, String> metadataPartialProcessor(WorkerCommand command) {
         return new Processor<>() {
             private ProcessorContext<String, String> context;
-            private KeyValueStore<String, String> dedupe;
-            private KeyValueStore<String, String> aggregates;
+            private final Map<Long, Workload.WindowAccumulator> windows = new HashMap<>();
 
             @Override public void init(ProcessorContext<String, String> context) {
                 this.context = context;
-                dedupe = context.getStateStore(DEDUPE_STORE);
-                aggregates = context.getStateStore(AGGREGATE_STORE);
             }
 
             @Override public void process(Record<String, String> record) {
@@ -99,35 +88,48 @@ final class KafkaStreamsProcessor implements ProcessorSession {
                 InputEvent input = EventCodec.readInput(record.value());
                 if (!command.runId().equals(input.runId())) return;
                 if (input.sequenceNumber() < 0) {
-                    publishAggregates(record.timestamp());
+                    long flushStarted = System.nanoTime();
+                    Workload.WindowAccumulator aggregate = windows.remove(input.windowIndex());
+                    if (aggregate == null) aggregate = new Workload.WindowAccumulator();
+                    PartialAggregate partial = aggregate.partial(command.runId(), input.windowIndex(),
+                            context.recordMetadata().orElseThrow().partition());
+                    context.forward(new Record<>(Long.toString(input.windowIndex()),
+                            EventCodec.write(partial), record.timestamp()));
+                    metrics.flushed(System.nanoTime() - flushStarted);
                     return;
                 }
                 metrics.ingested();
                 consumed.incrementAndGet();
-                if (!input.eventId().equals(dedupe.get(input.key()))) {
-                    dedupe.put(input.key(), input.eventId());
-                    String aggregateKey = Workload.aggregateKey(record.timestamp(), input.key());
-                    String previousValue = aggregates.get(aggregateKey);
-                    OutputEvent previous = previousValue == null ? null : EventCodec.readOutput(previousValue);
-                    aggregates.put(aggregateKey, EventCodec.write(
-                            Workload.aggregate(input, previous, System.currentTimeMillis())));
-                }
+                windows.computeIfAbsent(input.windowIndex(), ignored -> new Workload.WindowAccumulator()).add(input);
                 metrics.processed(System.nanoTime() - started);
             }
+        };
+    }
 
-            private void publishAggregates(long timestamp) {
+    private Processor<String, String, String, String> metadataGlobalProcessor(Config config, WorkerCommand command) {
+        return new Processor<>() {
+            private ProcessorContext<String, String> context;
+            private final Map<Long, Workload.WindowAccumulator> windows = new HashMap<>();
+            private final Map<Long, Integer> parts = new HashMap<>();
+
+            @Override public void init(ProcessorContext<String, String> context) { this.context = context; }
+
+            @Override public void process(Record<String, String> record) {
+                PartialAggregate partial;
+                try { partial = EventCodec.readPartial(record.value()); }
+                catch (IllegalArgumentException ignored) { return; }
+                if (!command.runId().equals(partial.runId())) return;
                 long started = System.nanoTime();
-                ArrayList<String> publishedKeys = new ArrayList<>();
-                try (KeyValueIterator<String, String> iterator = aggregates.all()) {
-                    while (iterator.hasNext()) {
-                        KeyValue<String, String> aggregate = iterator.next();
-                        OutputEvent output = EventCodec.readOutput(aggregate.value);
-                        context.forward(new Record<>(output.key(), aggregate.value, timestamp));
-                        forwarded.incrementAndGet();
-                        publishedKeys.add(aggregate.key);
-                    }
+                windows.computeIfAbsent(partial.windowIndex(), ignored -> new Workload.WindowAccumulator()).merge(partial);
+                int received = parts.merge(partial.windowIndex(), 1, Integer::sum);
+                if (received == command.inputPartitions()) {
+                    OutputEvent output = windows.remove(partial.windowIndex()).output(command.runId(),
+                            partial.windowIndex(), config.outputIntervalSeconds(), command.durationSeconds(),
+                            System.currentTimeMillis());
+                    parts.remove(partial.windowIndex());
+                    context.forward(new Record<>(output.key(), EventCodec.write(output), record.timestamp()));
+                    forwarded.incrementAndGet();
                 }
-                publishedKeys.forEach(aggregates::delete);
                 metrics.flushed(System.nanoTime() - started);
             }
         };

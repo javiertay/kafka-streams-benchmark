@@ -22,10 +22,11 @@ final class BenchmarkOrchestrator {
                         .filter(services -> isMeaningfulScalingScenario(partitions, services)).count())
                 .sum();
         System.out.printf("[benchmark] Starting matrix: %d scenario%s, 2 implementations, "
-                        + "%d measured iteration%s, %,d events/run, %,d warm-up events%n",
+                        + "%d measured iteration%s, %ds/run, %ds warm-up, %,d-%,d inputs/s%n",
                 totalScenarios, totalScenarios == 1 ? "" : "s",
                 config.iterations(), config.iterations() == 1 ? "" : "s",
-                config.eventCount(), config.warmupEventCount());
+                config.durationSeconds(), config.warmupDurationSeconds(),
+                config.minInputsPerSecond(), config.maxInputsPerSecond());
         List<BenchmarkResult> results = new ArrayList<>();
         List<SkippedScenario> skipped = new ArrayList<>();
         int scenarioNumber = 0;
@@ -56,28 +57,30 @@ final class BenchmarkOrchestrator {
         long scenarioStarted = System.nanoTime();
         String scenario = "[scenario " + scenarioNumber + "/" + totalScenarios + "]";
         System.out.printf("%s Starting: %,d events, %d partition%s, %d service%s%n",
-                scenario, config.eventCount(), requestedPartitions,
+                scenario, Workload.inputSchedule(config.durationSeconds(), config.minInputsPerSecond(),
+                        config.maxInputsPerSecond(), config.workloadSeed()).stream().mapToInt(Integer::intValue).sum(), requestedPartitions,
                 requestedPartitions == 1 ? "" : "s", serviceInstances,
                 serviceInstances == 1 ? "" : "s");
         if (shouldSkip(requestedPartitions, actualPartitions)) {
             String reason = "The retained topics already have " + actualPartitions
                     + " partitions; Kafka partitions cannot be decreased.";
-            skipped.add(new SkippedScenario(config.eventCount(), requestedPartitions, actualPartitions,
+            skipped.add(new SkippedScenario(Workload.inputSchedule(config.durationSeconds(), config.minInputsPerSecond(),
+                            config.maxInputsPerSecond(), config.workloadSeed()).stream().mapToInt(Integer::intValue).sum(),
+                    requestedPartitions, actualPartitions,
                     serviceInstances, reason));
             reports.write(config.resultsDir(), results, skipped);
             System.out.printf("%s SKIPPED: %s%n", scenario, reason);
             return;
         }
 
-        if (config.warmupEventCount() > 0) {
-            long seed = seed(requestedPartitions, serviceInstances, config.warmupEventCount(), 0);
-            streams.run(config, config.warmupEventCount(), requestedPartitions, actualPartitions,
-                    serviceInstances, 0, seed);
-            plain.run(config, config.warmupEventCount(), requestedPartitions, actualPartitions,
-                    serviceInstances, 0, seed);
+        if (config.warmupDurationSeconds() > 0) {
+            streams.run(config, config.warmupDurationSeconds(), requestedPartitions, actualPartitions,
+                    serviceInstances, 0, config.workloadSeed());
+            plain.run(config, config.warmupDurationSeconds(), requestedPartitions, actualPartitions,
+                    serviceInstances, 0, config.workloadSeed());
         }
         for (int iteration = 1; iteration <= config.iterations(); iteration++) {
-            long seed = seed(requestedPartitions, serviceInstances, config.eventCount(), iteration);
+            long seed = config.workloadSeed();
             DistributedRunner first = streamsFirst(iteration) ? streams : plain;
             DistributedRunner second = streamsFirst(iteration) ? plain : streams;
             runAndReport(first, config, results, skipped, requestedPartitions, actualPartitions,
@@ -93,7 +96,7 @@ final class BenchmarkOrchestrator {
     private void runAndReport(DistributedRunner runner, Config config, List<BenchmarkResult> results,
                               List<SkippedScenario> skipped, int requestedPartitions, int actualPartitions,
                               int serviceInstances, int iteration, long seed) throws Exception {
-        results.add(runner.run(config, config.eventCount(), requestedPartitions, actualPartitions,
+        results.add(runner.run(config, config.durationSeconds(), requestedPartitions, actualPartitions,
                 serviceInstances, iteration, seed));
         reports.write(config.resultsDir(), results, skipped);
         System.out.printf("[report] Updated: %d measured run%s, %d skipped%n",
@@ -104,7 +107,4 @@ final class BenchmarkOrchestrator {
         return (System.nanoTime() - startedNanos) / 1_000_000_000.0;
     }
 
-    private static long seed(int partitions, int serviceInstances, long eventCount, int iteration) {
-        return 42L + partitions * 17L + serviceInstances * 13L + eventCount * 7L + iteration;
-    }
 }

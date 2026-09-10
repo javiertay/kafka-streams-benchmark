@@ -23,14 +23,20 @@ class ConfigTest {
         env.put("KAFKA_BROKER_COUNT", "3");
         env.put("BENCHMARK_PARTITIONS", "1,3");
         env.put("BENCHMARK_SERVICE_INSTANCES", "1,3,6");
-        env.put("BENCHMARK_EVENT_COUNT", "500000");
-        env.put("BENCHMARK_WARMUP_EVENT_COUNT", "50000");
+        env.put("BENCHMARK_DURATION_SECONDS", "300");
+        env.put("BENCHMARK_OUTPUT_INTERVAL_SECONDS", "5");
+        env.put("BENCHMARK_MIN_INPUTS_PER_SECOND", "10");
+        env.put("BENCHMARK_MAX_INPUTS_PER_SECOND", "500");
+        env.put("BENCHMARK_DUPLICATE_PERCENT", "20");
         env.put("BENCHMARK_WORKER_URLS", "http://worker-1:8080, http://worker-2:8080");
         env.put("KAFKA_PROPERTY_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM", "https");
         Config config = Config.from(env);
         assertEquals(java.util.List.of(1, 3, 6), config.serviceInstances());
-        assertEquals(500_000, config.eventCount());
-        assertEquals(50_000, config.warmupEventCount());
+        assertEquals(300, config.durationSeconds());
+        assertEquals(5, config.outputIntervalSeconds());
+        assertEquals(10, config.minInputsPerSecond());
+        assertEquals(500, config.maxInputsPerSecond());
+        assertEquals(20, config.duplicatePercent());
         assertEquals(java.util.List.of("http://worker-1:8080", "http://worker-2:8080"), config.workerUrls());
         assertEquals(3, config.brokerCount());
         assertEquals(3, config.replicationFactor());
@@ -94,15 +100,20 @@ class ConfigTest {
                 "KAFKA_SECURITY_PROTOCOL", "HTTP")));
     }
 
-    @Test void rejectsNonPositiveEventCountAndNegativeWarmupCount() {
+    @Test void validatesStreamingWorkloadConfiguration() {
         assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
                 "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
                 "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
-                "BENCHMARK_EVENT_COUNT", "0")));
+                "BENCHMARK_DURATION_SECONDS", "0")));
         assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
                 "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
                 "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
-                "BENCHMARK_WARMUP_EVENT_COUNT", "-1")));
+                "BENCHMARK_MIN_INPUTS_PER_SECOND", "501",
+                "BENCHMARK_MAX_INPUTS_PER_SECOND", "500")));
+        assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
+                "BENCHMARK_DUPLICATE_PERCENT", "101")));
     }
 
     @Test void rejectsReplicationFactorAboveBrokerCount() {

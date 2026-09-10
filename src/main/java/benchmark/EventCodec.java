@@ -24,6 +24,9 @@ final class EventCodec {
         return read(value, OutputEvent.class);
     }
 
+    static PartialAggregate readPartial(String value) { return read(value, PartialAggregate.class); }
+    static ConsolidatedPayload readConsolidated(String value) { return read(value, ConsolidatedPayload.class); }
+
     private static <T> T read(String value, Class<T> type) {
         try {
             return JSON.readValue(value, type);

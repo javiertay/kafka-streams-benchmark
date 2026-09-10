@@ -15,7 +15,8 @@ interface ProcessorSession {
     }
 }
 
-record WorkerCommand(String implementation, String runId, String groupId, long estimatedEvents) {}
+record WorkerCommand(String implementation, String runId, String groupId,
+                     long estimatedEvents, int inputPartitions, int durationSeconds) {}
 
 record ProcessorReport(int consumed, int published, MetricsSnapshot metrics, ResourceUsage resources,
                        List<ResourceSample> resourceSamples, long gcCount, long gcTimeMs) {

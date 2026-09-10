@@ -4,11 +4,13 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Random;
 import java.util.UUID;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.SplittableRandom;
+import java.util.TreeSet;
+import java.util.HashSet;
 
 final class Workload {
-    static final int DUPLICATE_EVERY = 5;
-    static final long AGGREGATION_WINDOW_MS = 1_000;
-
     private Workload() {}
 
     static InputEvent event(String runId, long sequence, int payloadBytes, int uniqueKeys, long seed, long generatedAt) {
@@ -18,7 +20,24 @@ final class Workload {
         String payload = Base64.getEncoder().encodeToString(bytes);
         String idSource = seed + ":" + sequence;
         String eventId = UUID.nameUUIDFromBytes(idSource.getBytes(StandardCharsets.UTF_8)).toString();
-        return new InputEvent(eventId, runId, sequence, "key-" + Math.floorMod(sequence, uniqueKeys), generatedAt, payload);
+        return new InputEvent(eventId, runId, sequence, 0,
+                "key-" + Math.floorMod(sequence, uniqueKeys), generatedAt, payload);
+    }
+
+    static InputEvent event(String runId, long physicalSequence, long identitySequence, long windowIndex,
+                            int payloadBytes, int uniqueKeys, long seed, long generatedAt) {
+        InputEvent identity = event(runId, identitySequence, payloadBytes, uniqueKeys, seed, generatedAt);
+        return new InputEvent(identity.eventId(), runId, physicalSequence, windowIndex,
+                identity.key(), generatedAt, identity.payload());
+    }
+
+    static List<Integer> inputSchedule(int durationSeconds, int minimum, int maximum, long seed) {
+        SplittableRandom random = new SplittableRandom(seed);
+        List<Integer> schedule = new ArrayList<>(durationSeconds);
+        for (int second = 0; second < durationSeconds; second++) {
+            schedule.add(random.nextInt(minimum, maximum + 1));
+        }
+        return List.copyOf(schedule);
     }
 
     static OutputEvent transform(InputEvent input, long processedAt) {
@@ -29,26 +48,39 @@ final class Workload {
                 input.generatedTimestamp(), processedAt, input.payload(), value);
     }
 
-    static long metadataSequence(long producedSequence) {
-        return producedSequence > 0 && producedSequence % DUPLICATE_EVERY == 0
-                ? producedSequence - 1 : producedSequence;
+    static final class WindowAccumulator {
+        private final HashSet<String> eventIds = new HashSet<>();
+        private final TreeSet<String> trackIds = new TreeSet<>();
+        private int total;
+        private int duplicates;
+
+        void add(InputEvent input) {
+            total++;
+            if (eventIds.add(input.eventId())) trackIds.add(input.key());
+            else duplicates++;
+        }
+
+        void merge(PartialAggregate partial) {
+            total += partial.totalInputCount();
+            duplicates += partial.duplicateCount();
+            trackIds.addAll(partial.trackIds());
+        }
+
+        PartialAggregate partial(String runId, long window, int partition) {
+            return new PartialAggregate(runId, window, partition, List.copyOf(trackIds),
+                    total, total - duplicates, duplicates);
+        }
+
+        OutputEvent output(String runId, long window, int intervalSeconds,
+                           int durationSeconds, long processedAt) {
+            ConsolidatedPayload payload = new ConsolidatedPayload(window,
+                    window * intervalSeconds * 1_000L,
+                    Math.min((window + 1) * intervalSeconds, durationSeconds) * 1_000L,
+                    List.copyOf(trackIds), total, total - duplicates, trackIds.size(), duplicates);
+            String json = EventCodec.write(payload);
+            return new OutputEvent("window-" + window, runId, window, "window-" + window,
+                    0, processedAt, json, json.hashCode());
+        }
     }
 
-    static long eventTime(long sequence, long eventCount) {
-        return sequence * AGGREGATION_WINDOW_MS / eventCount;
-    }
-
-    static String aggregateKey(long eventTime, String key) {
-        return eventTime / AGGREGATION_WINDOW_MS + ":" + key;
-    }
-
-    static String aggregateStateKey(int partition, long eventTime, String key) {
-        return partition + ":" + aggregateKey(eventTime, key);
-    }
-
-    static OutputEvent aggregate(InputEvent input, OutputEvent previous, long processedAt) {
-        long count = previous == null ? 1 : previous.deterministicValue() + 1;
-        return new OutputEvent(input.eventId(), input.runId(), input.sequenceNumber(), input.key(),
-                input.generatedTimestamp(), processedAt, input.payload(), count);
-    }
 }

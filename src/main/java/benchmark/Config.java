@@ -12,9 +12,11 @@ import java.util.Set;
 
 record Config(
         String bootstrapServers, int brokerCount, String securityProtocol, Path truststore, String truststorePassword,
-        String inputTopic, String outputTopic, List<Integer> partitions,
+        String inputTopic, String partialTopic, String outputTopic, List<Integer> partitions,
         int payloadBytes, int uniqueKeys, List<Integer> serviceInstances,
-        int warmupEventCount, int eventCount, int iterations, int replicationFactor,
+        int warmupDurationSeconds, int durationSeconds, int outputIntervalSeconds,
+        int minInputsPerSecond, int maxInputsPerSecond, int duplicatePercent, long workloadSeed,
+        int iterations, int replicationFactor,
         int httpPort, Path resultsDir, int timeoutSeconds, String processingGuarantee,
         ProcessingMode processingMode, List<String> workerUrls, Map<String, String> extraKafkaProperties) {
 
@@ -32,8 +34,14 @@ record Config(
         var partitions = positiveList(env.getOrDefault("BENCHMARK_PARTITIONS", "1,3,6,12"), "BENCHMARK_PARTITIONS");
         var serviceInstances = positiveList(env.getOrDefault("BENCHMARK_SERVICE_INSTANCES", "1"),
                 "BENCHMARK_SERVICE_INSTANCES");
-        int eventCount = positiveInt(env, "BENCHMARK_EVENT_COUNT", 500_000);
-        int warmupEventCount = nonNegativeInt(env, "BENCHMARK_WARMUP_EVENT_COUNT", 50_000);
+        int durationSeconds = positiveInt(env, "BENCHMARK_DURATION_SECONDS", 300);
+        int outputIntervalSeconds = positiveInt(env, "BENCHMARK_OUTPUT_INTERVAL_SECONDS", 5);
+        int minInputsPerSecond = nonNegativeInt(env, "BENCHMARK_MIN_INPUTS_PER_SECOND", 10);
+        int maxInputsPerSecond = positiveInt(env, "BENCHMARK_MAX_INPUTS_PER_SECOND", 500);
+        if (minInputsPerSecond > maxInputsPerSecond) {
+            throw new IllegalArgumentException("BENCHMARK_MIN_INPUTS_PER_SECOND must not exceed BENCHMARK_MAX_INPUTS_PER_SECOND");
+        }
+        int duplicatePercent = boundedPercent(env, "BENCHMARK_DUPLICATE_PERCENT", 20);
         for (int i = 1; i < partitions.size(); i++) {
             if (partitions.get(i) <= partitions.get(i - 1)) {
                 throw new IllegalArgumentException("BENCHMARK_PARTITIONS must be strictly ascending");
@@ -51,13 +59,15 @@ record Config(
         }
         Config config = new Config(bootstrap, brokerCount, securityProtocol, truststore, password,
                 env.getOrDefault("BENCHMARK_INPUT_TOPIC", "benchmark-input"),
+                env.getOrDefault("BENCHMARK_PARTIAL_TOPIC", "benchmark-metadata-partials"),
                 env.getOrDefault("BENCHMARK_OUTPUT_TOPIC", "benchmark-output"),
                 partitions,
                 positiveInt(env, "BENCHMARK_PAYLOAD_BYTES", 1024),
                 positiveInt(env, "BENCHMARK_UNIQUE_KEYS", 1000),
                 serviceInstances,
-                warmupEventCount,
-                eventCount,
+                nonNegativeInt(env, "BENCHMARK_WARMUP_DURATION_SECONDS", 10),
+                durationSeconds, outputIntervalSeconds, minInputsPerSecond, maxInputsPerSecond,
+                duplicatePercent, Long.parseLong(env.getOrDefault("BENCHMARK_WORKLOAD_SEED", "42")),
                 fairIterations(env),
                 replicationFactor,
                 positiveInt(env, "BENCHMARK_HTTP_PORT", 8080),
@@ -92,12 +102,18 @@ record Config(
         safe.put("securityProtocol", securityProtocol);
         if (truststore != null) safe.put("truststoreLocation", truststore.toString());
         safe.put("inputTopic", inputTopic);
+        safe.put("partialTopic", partialTopic);
         safe.put("outputTopic", outputTopic);
         safe.put("payloadBytes", payloadBytes);
         safe.put("uniqueKeys", uniqueKeys);
         safe.put("serviceInstanceScenarios", serviceInstances);
-        safe.put("eventCount", eventCount);
-        safe.put("warmupEventCount", warmupEventCount);
+        safe.put("durationSeconds", durationSeconds);
+        safe.put("outputIntervalSeconds", outputIntervalSeconds);
+        safe.put("minInputsPerSecond", minInputsPerSecond);
+        safe.put("maxInputsPerSecond", maxInputsPerSecond);
+        safe.put("duplicatePercent", duplicatePercent);
+        safe.put("workloadSeed", workloadSeed);
+        safe.put("warmupDurationSeconds", warmupDurationSeconds);
         safe.put("replicationFactor", replicationFactor);
         safe.put("processingMode", processingMode.name().toLowerCase(Locale.ROOT));
         return safe;
@@ -136,6 +152,12 @@ record Config(
     private static int nonNegativeInt(Map<String, String> env, String key, int fallback) {
         int value = Integer.parseInt(env.getOrDefault(key, Integer.toString(fallback)));
         if (value < 0) throw new IllegalArgumentException(key + " must not be negative");
+        return value;
+    }
+
+    private static int boundedPercent(Map<String, String> env, String key, int fallback) {
+        int value = Integer.parseInt(env.getOrDefault(key, Integer.toString(fallback)));
+        if (value < 0 || value > 100) throw new IllegalArgumentException(key + " must be between 0 and 100");
         return value;
     }
 

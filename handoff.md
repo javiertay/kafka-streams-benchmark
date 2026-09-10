@@ -1,18 +1,18 @@
 # Current objective
 
-Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with plain Kafka consumers using exactly 500,000 inputs per measured run, partition variations, and horizontal processor-service scaling.
+Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with plain Kafka consumers using the same deterministic variable-rate live input schedule, periodic consolidated metadata outputs, partition variations, and horizontal processor-service scaling.
 
 # Completed work
 
-- Uses `BENCHMARK_EVENT_COUNT` (500,000 by default) as the exact workload size for every measured run. The full JSON input set is preloaded and flushed before processor timing begins; generation is not measured.
-- Uses a fixed `BENCHMARK_WARMUP_EVENT_COUNT`, with no measurement-duration or requested-input-rate scenario axes.
+- Uses a seeded per-second schedule bounded by `BENCHMARK_MIN_INPUTS_PER_SECOND` and `BENCHMARK_MAX_INPUTS_PER_SECOND`, replayed identically for every implementation and iteration.
+- Uses configurable measured/warm-up durations, periodic output intervals, and deterministic duplicate percentages.
 - Separated coordinator work (generation, observation, reporting) from processor resources.
 - Added six Compose worker services. Each active worker is a separate JVM/container with one Kafka Streams instance/stream thread or one conventional consumer/producer pair.
-- Workers share the run-specific Streams application ID or plain consumer group. Each group's starting offsets are prepared before its fixed input set is preloaded.
+- Workers share the run-specific Streams application ID or plain consumer groups. Starting offsets are prepared before workers start and live input begins.
 - Aggregated worker counters, latency samples, CPU, RAM, and GC data; recorded per-service consumption distribution.
 - Bounded each stage to 100,000 evenly spaced latency samples for large sustained runs.
 - Added tabbed HTML configuration navigation and documented how to interpret fixed-workload completion time and throughput.
-- Added concise coordinator and worker lifecycle logs for matrix/scenario progress, input preloading, measurement start, fixed-input processing, worker shutdown, report writes, validation, failures, and unambiguous final completion.
+- Added concise coordinator and worker lifecycle logs for matrix/scenario progress, measurement start, variable-rate streaming, output draining, worker shutdown, report writes, validation, failures, and unambiguous final completion.
 - Fixed multi-service startup: workers now start concurrently, startup uses `BENCHMARK_TIMEOUT_SECONDS`, repeated start requests for the same run are idempotent, and partial startup failures clean up workers that already started.
 - Fixed conventional consumers with more services than partitions: a worker is ready after its first successful group poll, even when Kafka correctly assigns it no partition.
 - Added an HTML overall summary that declares whether Kafka Streams or plain Java did better by counting valid configuration wins using median total processing throughput; ties and excluded invalid comparisons are shown explicitly.
@@ -22,12 +22,11 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 - Made benchmark topic replication default to the configured broker count, configured local minimum ISR as one for a single broker and two otherwise, and reject replication factors above the declared broker count.
 - Added a coordinator preflight that waits for exactly `KAFKA_BROKER_COUNT` registered brokers before any scenario starts.
 - Added broker count and replication factor to safe result configuration and to the HTML report header so one- and three-broker verdicts remain visibly separate.
-- Reduced the matrix to one configurable fixed count of 500,000 inputs, leaving six meaningful partition/service configurations.
-- Added `BENCHMARK_PROCESSING_MODE=transform|metadata`. Compose defaults to the metadata workload, which injects deterministic duplicates, deduplicates the latest event per key, aggregates accepted updates by key and one-second logical window, and suppresses intermediate output until per-partition completion markers arrive.
+- Added `BENCHMARK_PROCESSING_MODE=transform|metadata`. Metadata mode injects deterministic duplicates, builds partition partials per configurable interval, and globally merges them into one consolidated track-ID payload.
 - Implemented equivalent bounded in-memory metadata state in Kafka Streams task stores and plain Java maps, with Kafka Streams changelogging disabled so this is a processing benchmark rather than an unequal recovery benchmark.
-- Results now distinguish generated inputs from expected outputs; validation requires every input consumed, every expected output published/observed exactly once, and every final aggregate sequence/count to match the generator's independent expectation.
-- Fixed a conventional-consumer startup race uncovered by strict validation. The current fixed-input design prepares committed group offsets before preloading, then lets all workers join and consume the already-complete backlog.
-- Aligned processing timing boundaries: both implementations are timed from JSON decoding through business logic and output handoff. Metadata final aggregate flushing is timed separately per partition marker.
+- Results distinguish scheduled inputs from expected outputs; validation requires every input consumed and every consolidated interval payload published and observed exactly once with the expected payload hash.
+- Consumer starting offsets are prepared before workers join, and the live schedule begins only after group membership is stable.
+- Aligned processing timing boundaries: both implementations are timed from JSON decoding through business logic and output handoff. Metadata partial creation and global merging are measured as flush work.
 - Corrected stage throughput to count the intervals between first and last events, and changed headline/summary throughput to consumed inputs over total elapsed time so metadata suppression does not make low output cardinality look like low processing capacity.
 - Publishing throughput now uses the coordinator observer's monotonic clock; cross-worker ingestion and processing windows retain wall-clock boundaries so timestamps can be merged across service JVMs on the same host.
 
@@ -60,8 +59,7 @@ Deliver a maintainable Maven/Java 25 benchmark that compares Kafka Streams with 
 
 # Known issues / unverified
 
-- The complete default 500,000-record × 1/3/6 partitions × 1/3/6 services matrix has not been run; only earlier focused distributed smoke runs are integration-verified.
-- Input preloading is excluded from all processor timing and throughput results.
+- The complete default five-minute variable-rate matrix has not been run; only earlier workload designs received distributed integration smoke coverage.
 - No SSL Kafka cluster was supplied, so SSL integration remains unverified.
 - The two-broker option is structurally configured and Compose-validated but has not received a full runtime smoke test; the requested one- and three-broker comparison modes have.
 - Metadata state is intentionally volatile and Kafka Streams changelogging is disabled for parity; crash recovery and restoration behavior remain outside the benchmark.

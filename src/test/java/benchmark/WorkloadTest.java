@@ -20,18 +20,36 @@ class WorkloadTest {
         assertEquals(first, EventCodec.readOutput(EventCodec.write(first)));
     }
 
-    @Test void metadataWorkloadDuplicatesEveryFifthEventAndAggregatesCounts() {
-        assertEquals(4, Workload.metadataSequence(4));
-        assertEquals(4, Workload.metadataSequence(5));
-        assertEquals(6, Workload.metadataSequence(6));
-        assertEquals("2:key-7", Workload.aggregateKey(2_500, "key-7"));
-        assertEquals(0, Workload.eventTime(0, 500_000));
-        assertEquals(999, Workload.eventTime(499_999, 500_000));
+    @Test void variableInputScheduleIsDeterministicAndBounded() {
+        var first = Workload.inputSchedule(300, 10, 500, 42);
+        var second = Workload.inputSchedule(300, 10, 500, 42);
+        assertEquals(first, second);
+        assertEquals(300, first.size());
+        assertTrue(first.stream().allMatch(value -> value >= 10 && value <= 500));
+        assertTrue(first.stream().distinct().count() > 1);
+    }
 
-        InputEvent input = Workload.event("run", 4, 4, 10, 42, 100);
-        OutputEvent first = Workload.aggregate(input, null, 200);
-        OutputEvent second = Workload.aggregate(input, first, 300);
-        assertEquals(1, first.deterministicValue());
-        assertEquals(2, second.deterministicValue());
+    @Test void consolidatedPayloadCountsDuplicatesAndMergesPartitionPartials() {
+        InputEvent first = Workload.event("run", 0, 0, 2, 8, 10, 42, 100);
+        InputEvent duplicate = new InputEvent(first.eventId(), "run", 1, 2,
+                first.key(), 101, first.payload());
+        InputEvent second = Workload.event("run", 2, 1, 2, 8, 10, 42, 102);
+        Workload.WindowAccumulator left = new Workload.WindowAccumulator();
+        left.add(first);
+        left.add(duplicate);
+        Workload.WindowAccumulator right = new Workload.WindowAccumulator();
+        right.add(second);
+        Workload.WindowAccumulator global = new Workload.WindowAccumulator();
+        global.merge(left.partial("run", 2, 0));
+        global.merge(right.partial("run", 2, 1));
+
+        ConsolidatedPayload payload = EventCodec.readConsolidated(global.output("run", 2, 5, 15, 200).payload());
+        assertEquals(3, payload.totalInputCount());
+        assertEquals(2, payload.uniqueEventCount());
+        assertEquals(2, payload.uniqueTrackIdCount());
+        assertEquals(1, payload.duplicateCount());
+        assertEquals(java.util.List.of("key-0", "key-1"), payload.trackIds());
+        assertEquals(10_000, payload.windowStartMillis());
+        assertEquals(15_000, payload.windowEndMillis());
     }
 }

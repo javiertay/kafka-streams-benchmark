@@ -12,38 +12,44 @@ final class DistributedRunner {
         this.groupPrefix = groupPrefix;
     }
 
-    BenchmarkResult run(Config config, int eventCount, int requestedPartitions, int actualPartitions,
+    BenchmarkResult run(Config config, int durationSeconds, int requestedPartitions, int actualPartitions,
                         int serviceInstances, int iteration, long seed) throws Exception {
         long runStarted = System.nanoTime();
         String phase = iteration == 0 ? "warm-up" : "iteration " + iteration;
         String prefix = "[" + implementation + "][" + phase + "]";
         String runId = RunSupport.runId(implementation);
         String groupId = groupPrefix + runId;
-        System.out.printf("%s STARTING: %d service%s, %d partition%s, %,d fixed input events%n",
+        System.out.printf("%s STARTING: %d service%s, %d partition%s, %,d scheduled input events over %ds%n",
                 prefix, serviceInstances, serviceInstances == 1 ? "" : "s",
                 actualPartitions, actualPartitions == 1 ? "" : "s",
-                eventCount);
+                Workload.inputSchedule(durationSeconds, config.minInputsPerSecond(),
+                        config.maxInputsPerSecond(), seed).stream().mapToInt(Integer::intValue).sum(),
+                durationSeconds);
         System.out.printf("%s Preparing consumer group at the input-topic end%n", prefix);
         KafkaSupport.prepareGroupAtEnd(config, groupId, config.inputTopic());
-        System.out.printf("%s Preloading %,d JSON input records (excluded from measurements)%n",
-                prefix, eventCount);
-        Generation generation = RunSupport.generate(config, runId, eventCount, seed, actualPartitions);
-        System.out.printf("%s Input ready: %,d records, %,d expected outputs%n",
-                prefix, generation.sent(), generation.expectedOutputs());
-        StageMetrics metrics = new StageMetrics(eventCount);
-        WorkerCommand command = new WorkerCommand(implementation, runId, groupId, eventCount);
+        if (config.processingMode() == ProcessingMode.METADATA) {
+            KafkaSupport.prepareGroupAtEnd(config, groupId, config.partialTopic());
+        }
+        int estimatedEvents = Workload.inputSchedule(durationSeconds, config.minInputsPerSecond(),
+                config.maxInputsPerSecond(), seed).stream().mapToInt(Integer::intValue).sum();
+        StageMetrics metrics = new StageMetrics(estimatedEvents);
+        WorkerCommand command = new WorkerCommand(implementation, runId, groupId,
+                estimatedEvents, actualPartitions, durationSeconds);
         System.out.printf("%s Starting output observer%n", prefix);
         try (OutputCollector collector = new OutputCollector(config, runId, metrics)) {
-            collector.expect(generation.expectedOutputs(), generation.expectedAggregates());
-            System.out.printf("%s MEASUREMENT START: launching %d worker service%s%n", prefix,
+            System.out.printf("%s Launching %d worker service%s%n", prefix,
                     serviceInstances, serviceInstances == 1 ? "" : "s");
-            long processingStarted = System.nanoTime();
             try (DistributedWorkers workers = DistributedWorkers.start(config, serviceInstances, command)) {
                 System.out.printf("%s Waiting for %d consumer-group member%s%n", prefix,
                         serviceInstances, serviceInstances == 1 ? "" : "s");
                 KafkaSupport.awaitGroupMembers(config, groupId, serviceInstances);
-                System.out.printf("%s Processing fixed input: %,d/%,d outputs observed (timeout %ds)%n",
-                        prefix, collector.observed(), generation.expectedOutputs(), config.timeoutSeconds());
+                System.out.printf("%s MEASUREMENT START: streaming variable input for %ds%n",
+                        prefix, durationSeconds);
+                long processingStarted = System.nanoTime();
+                Generation generation = RunSupport.generate(config, runId, durationSeconds, seed, actualPartitions);
+                collector.expect(generation.expectedOutputs(), generation.expectedAggregates());
+                System.out.printf("%s Input complete: %,d records; draining %,d expected outputs (timeout %ds)%n",
+                        prefix, generation.sent(), generation.expectedOutputs(), config.timeoutSeconds());
                 boolean completed = collector.await(Duration.ofSeconds(config.timeoutSeconds()));
                 long finished = System.nanoTime();
                 if (completed) {

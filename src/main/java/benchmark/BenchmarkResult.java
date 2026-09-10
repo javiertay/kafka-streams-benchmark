@@ -19,7 +19,8 @@ record RuntimeDetails(String javaVersion, String javaVendor, String vmName,
 
 record BenchmarkResult(
         String implementation, String timestamp, String runId, int iteration,
-        int eventCount, int requestedPartitions, int actualPartitions, int payloadBytes,
+        int eventCount, int durationSeconds, int outputIntervalSeconds,
+        int requestedPartitions, int actualPartitions, int payloadBytes,
         int serviceInstances, java.util.List<Integer> eventsConsumedPerService,
         double ingestionElapsedSeconds, double ingestionThroughput,
         double processingElapsedSeconds, double processingThroughput, Latency processingLatency,

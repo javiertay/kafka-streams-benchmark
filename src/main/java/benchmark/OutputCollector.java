@@ -24,8 +24,8 @@ final class OutputCollector implements AutoCloseable {
     private final AtomicInteger observed = new AtomicInteger();
     private final AtomicInteger duplicates = new AtomicInteger();
     private final AtomicInteger unexpected = new AtomicInteger();
-    private final Map<Integer, Long> observedValues = new HashMap<>();
-    private Map<Integer, Long> expectedAggregates = Map.of();
+    private final Map<Integer, String> observedValues = new HashMap<>();
+    private Map<Integer, String> expectedAggregates = Map.of();
     private final Thread thread;
 
     OutputCollector(Config config, String runId, StageMetrics metrics) throws InterruptedException {
@@ -62,7 +62,7 @@ final class OutputCollector implements AutoCloseable {
                         if (seen.get((int) sequence)) { duplicates.incrementAndGet(); continue; }
                         seen.set((int) sequence);
                         if (validateAggregateValues) {
-                            observedValues.put((int) sequence, output.deterministicValue());
+                            observedValues.put((int) sequence, output.payload());
                         }
                     }
                     observed.incrementAndGet();
@@ -77,7 +77,7 @@ final class OutputCollector implements AutoCloseable {
 
     boolean await(Duration timeout) throws InterruptedException { return complete.await(timeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS); }
 
-    void expect(int count, Map<Integer, Long> aggregates) {
+    void expect(int count, Map<Integer, String> aggregates) {
         expectedAggregates = aggregates;
         expected.set(count);
     }

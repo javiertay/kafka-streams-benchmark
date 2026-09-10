@@ -66,10 +66,10 @@ class ReportWriterTest {
         assertTrue(html.contains("3 services"));
         assertTrue(html.contains("3 brokers, replication factor 3"));
         assertTrue(html.contains("only this broker-count environment"));
-        assertTrue(html.contains("Metadata deduplication"));
+        assertTrue(html.contains("Seeded variable-rate input"));
         assertTrue(html.contains("Expected outputs"));
         assertTrue(html.contains("Metadata flush p99"));
-        assertTrue(html.contains("Fixed input records"));
+        assertTrue(html.contains("Scheduled input records"));
         assertTrue(html.contains("Total processing throughput"));
         assertEquals(2, html.split("role=\"tab\"", -1).length - 1);
         assertFalse(html.contains("Generation throughput"));
@@ -84,7 +84,7 @@ class ReportWriterTest {
                                           double totalThroughput, boolean valid) {
         Latency latency = new Latency(1, 2, 3, 4);
         return new BenchmarkResult(implementation, "2026-01-01T00:00:00Z",
-                implementation + eventCount + services, 1, eventCount, 3, 3, 256, services,
+                implementation + eventCount + services, 1, eventCount, 300, 5, 3, 3, 256, services,
                 java.util.Collections.nCopies(services, eventCount / services),
                 1, 10, 1, 10, latency, latency, 1, 10, latency,
                 10, totalThroughput, new ResourceUsage(1, 2, 3, 4),

@@ -54,17 +54,17 @@ final class ReportWriter {
                 details{margin-top:1rem}code{background:#edf1f7;padding:.1rem .3rem;border-radius:4px}@media(max-width:700px){main{padding:.7rem}.card{overflow-x:auto}th,td{white-space:nowrap}}
                 .config-tabs{display:flex;gap:.5rem;overflow-x:auto;padding:.25rem 0 1rem}.config-tab{white-space:nowrap;border:1px solid #aeb9ca;border-radius:999px;background:#fff;padding:.6rem .9rem;cursor:pointer}.config-tab[aria-selected=true]{background:#3157c8;color:#fff;border-color:#3157c8}.scenario-panel[hidden]{display:none}
                 </style></head><body><main>
-                <header><h1>Kafka Streams vs Plain Java</h1><p class="lead purpose"><strong>What performance are we testing?</strong> This benchmark preloads the same fixed number of deterministic JSON records, then measures how quickly each implementation ingests, processes, and publishes them, plus CPU and RAM. Input generation is excluded.</p>
+                <header><h1>Kafka Streams vs Plain Java</h1><p class="lead purpose"><strong>What performance are we testing?</strong> This benchmark streams the same seeded, second-by-second variable input schedule through both implementations. Metadata mode deduplicates track IDs and emits one consolidated payload at each configured interval.</p>
                 <p class="lead"><strong>Why are we doing this?</strong> To make an evidence-based choice between Kafka Streams and direct <code>KafkaConsumer</code>/<code>KafkaProducer</code> code under the same Java 25 runtime, Kafka cluster, workload, partitions, processing logic, and resource limits. Results describe this environment only; they are not universal performance claims.</p>
                 """ + environment + """
                 <p class="muted">Green marks the better displayed value. Values that round to the same display precision are ties. Invalid runs never receive a winner.</p></header>
                 <section class="card"><h2>Overall summary</h2><p class="verdict"><strong>""" + escape(overallSummary(results)) + """
                 </strong></p><p class="muted">Each complete, valid configuration gets one vote based on median total processing throughput. Workloads are not averaged together.</p></section>
-                <section class="card"><h2>How to read the results</h2><p><strong>Fixed input records:</strong> the complete JSON dataset placed on Kafka before processor timing begins. <strong>Expected outputs:</strong> equals input records in transform mode, but is the number of final key/window aggregates in metadata mode. <strong>Total elapsed time:</strong> worker launch until all expected outputs are observed. <strong>CPU/RAM:</strong> totals across processor services only; the preloader and observer are excluded.</p></section>
+                <section class="card"><h2>How to read the results</h2><p><strong>Scheduled input records:</strong> the total produced by the deterministic variable-rate schedule. <strong>Expected outputs:</strong> equals input records in transform mode; in metadata mode it is one consolidated payload per output interval. <strong>Total elapsed time:</strong> input streaming start until all expected outputs are observed. <strong>CPU/RAM:</strong> totals across processor services only; generator and observer are excluded.</p></section>
                 """ + (tabs.isEmpty() ? "" : "<nav class=\"config-tabs\" role=\"tablist\" aria-label=\"Benchmark configurations\">" + tabs + "</nav>")
                 + scenarios + (skipHtml.isEmpty() ? "" : "<section class=\"card\"><h2>Skipped scenarios</h2><ul>" + skipHtml + "</ul></section>") + """
                 <section class="card"><h2>Advanced JVM metrics</h2><p>Runtime, GC, heap, and safe Kafka configuration are available in <a href="summary.json">summary.json</a> and the per-run raw JSON files. Credentials are never written.</p>
-                <details><summary>Measurement notes and limitations</summary><p>Processing is timed identically from JSON decoding through business logic and output handoff. Metadata flush latency measures each partition's final aggregate scan and handoff separately. Kafka Streams does not expose a per-record producer acknowledgement callback, so publishing latency is measured from business-logic completion until the output observer receives the record. Latency percentiles use at most 100,000 evenly spaced samples per stage. Historical records are filtered by unique run ID.</p></details></section>
+                <details><summary>Measurement notes and limitations</summary><p>Both implementations replay the same seeded rate schedule. Processing is timed identically from JSON decoding through business logic and output handoff. Metadata flush latency includes partition-local payload creation and the global merge. Kafka Streams does not expose a per-record producer acknowledgement callback, so publishing latency is measured from business-logic completion until the output observer receives the record. Latency percentiles use at most 100,000 evenly spaced samples per stage. Historical records are filtered by unique run ID.</p></details></section>
                 </main><script>function showScenario(n){document.querySelectorAll('.scenario-panel').forEach((p,i)=>p.hidden=i!==n);document.querySelectorAll('.config-tab').forEach((b,i)=>b.setAttribute('aria-selected',i===n))}</script></body></html>
                 """;
     }
@@ -78,7 +78,9 @@ final class ReportWriter {
         boolean valid = streamsRuns.stream().allMatch(r -> r.validation().valid())
                 && plainRuns.stream().allMatch(r -> r.validation().valid());
         StringBuilder rows = new StringBuilder();
-        rows.append(neutralRow("Fixed input records", streams.eventCount(), plain.eventCount(), ""));
+        rows.append(neutralRow("Scheduled input records", streams.eventCount(), plain.eventCount(), ""));
+        rows.append(neutralRow("Run duration", streams.durationSeconds(), plain.durationSeconds(), " s"));
+        rows.append(neutralRow("Output interval", streams.outputIntervalSeconds(), plain.outputIntervalSeconds(), " s"));
         rows.append(neutralRow("Expected outputs", streams.validation().expected(), plain.validation().expected(), ""));
         rows.append(metricRow("Ingestion elapsed time", streams.ingestionElapsedSeconds(), plain.ingestionElapsedSeconds(), false, " s", valid));
         rows.append(metricRow("Ingestion throughput", streams.ingestionThroughput(), plain.ingestionThroughput(), true, "/s", valid));
@@ -103,7 +105,7 @@ final class ReportWriter {
         rows.append(metricRow("Peak RAM", streams.resources().peakRamMb(), plain.resources().peakRamMb(), false, " MB", valid));
         String range = String.format(Locale.ROOT, "Median of %d/%d iterations; total processing throughput ranges %.1f–%.1f/s vs %.1f–%.1f/s.",
                 streamsRuns.size(), plainRuns.size(), min(streamsRuns), max(streamsRuns), min(plainRuns), max(plainRuns));
-        String status = valid ? "<span class=\"valid\">Valid: both implementations processed the same fixed input count and output validation passed.</span>"
+        String status = valid ? "<span class=\"valid\">Valid: both implementations processed the same deterministic input schedule and output validation passed.</span>"
                 : "<div class=\"invalid\">Invalid: output validation failed. No winner is highlighted.</div>";
         return "<section class=\"card scenario-panel\" id=\"scenario-" + index + "\" role=\"tabpanel\""
                 + (visible ? "" : " hidden") + "><h2>" + number(scenario.eventCount()) + " events · "
@@ -182,7 +184,8 @@ final class ReportWriter {
 
     private static long rounded(double value) { return Math.round(value * 100); }
     private static List<Scenario> scenarios(List<BenchmarkResult> results) {
-        return results.stream().map(result -> new Scenario(result.eventCount(),
+        return results.stream().map(result -> new Scenario(result.eventCount(), result.durationSeconds(),
+                        result.outputIntervalSeconds(),
                         result.requestedPartitions(), result.actualPartitions(), result.serviceInstances()))
                 .distinct().sorted(Comparator.comparingInt(Scenario::partitions)
                         .thenComparingInt(Scenario::serviceInstances)
@@ -190,6 +193,8 @@ final class ReportWriter {
     }
     private static List<BenchmarkResult> matching(List<BenchmarkResult> all, Scenario scenario, String implementation) {
         return all.stream().filter(r -> r.eventCount() == scenario.eventCount()
+                && r.durationSeconds() == scenario.durationSeconds()
+                && r.outputIntervalSeconds() == scenario.outputIntervalSeconds()
                 && r.requestedPartitions() == scenario.partitions()
                 && r.serviceInstances() == scenario.serviceInstances()
                 && r.implementation().equals(implementation)).toList();
@@ -213,7 +218,7 @@ final class ReportWriter {
     }
     private static String workloadDescription(String mode) {
         return "metadata".equals(mode)
-                ? "Metadata deduplication, per-key one-second aggregation, and final-only suppressed output."
+                ? "Seeded variable-rate input, duplicate-event removal, and one globally consolidated track-ID payload per configured interval."
                 : "One input event is transformed into one output event.";
     }
     private static String plural(int count) { return count == 1 ? "" : "s"; }
@@ -223,6 +228,7 @@ final class ReportWriter {
     }
     private static String escape(String value) { return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;"); }
 
-    private record Scenario(int eventCount, int partitions, int actual, int serviceInstances) {}
+    private record Scenario(int eventCount, int durationSeconds, int outputIntervalSeconds,
+                            int partitions, int actual, int serviceInstances) {}
     private record Summary(List<BenchmarkResult> results, List<SkippedScenario> skippedScenarios) {}
 }

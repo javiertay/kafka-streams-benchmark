@@ -12,51 +12,79 @@ import java.util.concurrent.atomic.AtomicReference;
 final class RunSupport {
     private RunSupport() {}
 
-    static Generation generate(Config config, String runId, int eventCount, long seed,
+    static Generation generate(Config config, String runId, int durationSeconds, long seed,
                                int partitions) throws Exception {
         AtomicReference<Exception> failure = new AtomicReference<>();
-        Map<String, long[]> expectedMetadataOutputs = new HashMap<>();
+        Map<Long, Workload.WindowAccumulator> expectedWindows = new HashMap<>();
+        java.util.List<Integer> schedule = Workload.inputSchedule(durationSeconds,
+                config.minInputsPerSecond(), config.maxInputsPerSecond(), seed);
         int sequence = 0;
+        long identitySequence = 0;
+        java.util.SplittableRandom duplicates = new java.util.SplittableRandom(seed ^ 0x5deece66dL);
+        InputEvent previous = null;
+        long started = System.nanoTime();
         try (var producer = KafkaSupport.producer(config)) {
-            while (sequence < eventCount) {
-                long now = System.currentTimeMillis();
-                long eventSequence = config.processingMode() == ProcessingMode.METADATA
-                        ? Workload.metadataSequence(sequence) : sequence;
-                InputEvent event = Workload.event(
-                        runId, eventSequence, config.payloadBytes(), config.uniqueKeys(), seed, now);
-                long eventTime = config.processingMode() == ProcessingMode.METADATA
-                        ? Workload.eventTime(eventSequence, eventCount) : now;
+            for (int second = 0; second < schedule.size(); second++) {
+                long window = second / config.outputIntervalSeconds();
                 if (config.processingMode() == ProcessingMode.METADATA) {
-                    if (eventSequence == sequence) {
-                        expectedMetadataOutputs.compute(Workload.aggregateKey(eventTime, event.key()),
-                                (key, aggregate) -> new long[] {
-                                        eventSequence, aggregate == null ? 1 : aggregate[1] + 1
-                                });
-                    }
+                    expectedWindows.computeIfAbsent(window, ignored -> new Workload.WindowAccumulator());
                 }
-                producer.send(new ProducerRecord<>(
-                                config.inputTopic(), null, eventTime, event.key(), EventCodec.write(event)),
-                        (metadata, error) -> { if (error != null) failure.compareAndSet(null, error); });
-                sequence++;
-            }
-            if (config.processingMode() == ProcessingMode.METADATA) {
-                long markerTimestamp = 2 * Workload.AGGREGATION_WINDOW_MS;
-                for (int partition = 0; partition < partitions; partition++) {
-                    InputEvent marker = new InputEvent("marker-" + partition, runId, -1,
-                            "marker-" + partition, System.currentTimeMillis(), "");
-                    producer.send(new ProducerRecord<>(config.inputTopic(), partition, markerTimestamp,
-                                    marker.key(), EventCodec.write(marker)),
+                if (second % config.outputIntervalSeconds() == 0) previous = null;
+                int count = schedule.get(second);
+                for (int index = 0; index < count; index++) {
+                    waitUntil(started + second * 1_000_000_000L
+                            + (long) index * 1_000_000_000L / Math.max(1, count));
+                    long now = System.currentTimeMillis();
+                    boolean duplicate = config.processingMode() == ProcessingMode.METADATA && previous != null
+                            && duplicates.nextInt(100) < config.duplicatePercent();
+                    InputEvent event;
+                    if (duplicate) {
+                        event = new InputEvent(previous.eventId(), runId, sequence, window,
+                                previous.key(), now, previous.payload());
+                    } else {
+                        event = Workload.event(runId, sequence, identitySequence++, window,
+                                config.payloadBytes(), config.uniqueKeys(), seed, now);
+                        previous = event;
+                    }
+                    if (config.processingMode() == ProcessingMode.METADATA) {
+                        expectedWindows.computeIfAbsent(window, ignored -> new Workload.WindowAccumulator()).add(event);
+                    }
+                    long eventTime = second * 1_000L + (long) index * 1_000L / Math.max(1, count);
+                    producer.send(new ProducerRecord<>(config.inputTopic(), null, eventTime,
+                                    event.key(), EventCodec.write(event)),
                             (metadata, error) -> { if (error != null) failure.compareAndSet(null, error); });
+                    sequence++;
+                }
+                waitUntil(started + (second + 1L) * 1_000_000_000L);
+                boolean windowComplete = (second + 1) % config.outputIntervalSeconds() == 0
+                        || second + 1 == schedule.size();
+                if (config.processingMode() == ProcessingMode.METADATA && windowComplete) {
+                    for (int partition = 0; partition < partitions; partition++) {
+                        InputEvent marker = new InputEvent("marker-" + window + '-' + partition,
+                                runId, -1, window, "marker-" + partition, System.currentTimeMillis(), "");
+                        producer.send(new ProducerRecord<>(config.inputTopic(), partition,
+                                        (window + 1) * config.outputIntervalSeconds() * 1_000L,
+                                        marker.key(), EventCodec.write(marker)),
+                                (metadata, error) -> { if (error != null) failure.compareAndSet(null, error); });
+                    }
                 }
             }
             producer.flush();
             if (failure.get() != null) throw failure.get();
-            Map<Integer, Long> expectedAggregates = new HashMap<>();
-            expectedMetadataOutputs.values().forEach(
-                    aggregate -> expectedAggregates.put((int) aggregate[0], aggregate[1]));
+            Map<Integer, String> expectedAggregates = new HashMap<>();
+            expectedWindows.forEach((window, aggregate) -> expectedAggregates.put(window.intValue(),
+                    aggregate.output(runId, window, config.outputIntervalSeconds(), durationSeconds, 0).payload()));
             int expectedOutputs = config.processingMode() == ProcessingMode.METADATA
                     ? expectedAggregates.size() : sequence;
             return new Generation(sequence, expectedOutputs, Map.copyOf(expectedAggregates));
+        }
+    }
+
+    private static void waitUntil(long targetNanos) throws InterruptedException {
+        long remaining;
+        while ((remaining = targetNanos - System.nanoTime()) > 0) {
+            if (remaining > 2_000_000) Thread.sleep(Math.min(remaining / 1_000_000, 10));
+            else Thread.onSpinWait();
         }
     }
 
@@ -75,6 +103,7 @@ final class RunSupport {
                 Runtime.getRuntime().maxMemory() / 1024 / 1024 * serviceInstances,
                 String.join(" ", runtime.getInputArguments()), gcCount, gcTime);
         return new BenchmarkResult(implementation, java.time.Instant.now().toString(), runId, iteration, generation.sent(),
+                config.durationSeconds(), config.outputIntervalSeconds(),
                 requestedPartitions, actualPartitions, config.payloadBytes(), serviceInstances,
                 eventsConsumedPerService,
                 metrics.elapsedSeconds(metrics.firstIngestNanos, metrics.lastIngestNanos),
@@ -94,4 +123,4 @@ final class RunSupport {
     }
 }
 
-record Generation(int sent, int expectedOutputs, Map<Integer, Long> expectedAggregates) {}
+record Generation(int sent, int expectedOutputs, Map<Integer, String> expectedAggregates) {}

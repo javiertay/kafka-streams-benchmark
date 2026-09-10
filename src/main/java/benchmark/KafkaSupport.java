@@ -42,11 +42,13 @@ final class KafkaSupport {
     static int ensurePartitions(Config config, int requested) throws Exception {
         try (AdminClient admin = AdminClient.create(config.kafkaProperties())) {
             Set<String> existing = admin.listTopics().names().get();
-            List<String> missing = List.of(config.inputTopic(), config.outputTopic()).stream()
+            List<String> benchmarkTopics = List.of(config.inputTopic(), config.outputTopic(), config.partialTopic());
+            List<String> missing = benchmarkTopics.stream()
                     .filter(topic -> !existing.contains(topic)).toList();
             if (!missing.isEmpty()) {
                 List<NewTopic> topics = missing.stream()
-                        .map(topic -> new NewTopic(topic, requested, (short) config.replicationFactor())).toList();
+                        .map(topic -> new NewTopic(topic, topic.equals(config.partialTopic()) ? 1 : requested,
+                                (short) config.replicationFactor())).toList();
                 admin.createTopics(topics).all().get();
             }
             Map<String, org.apache.kafka.clients.admin.TopicDescription> descriptions =
