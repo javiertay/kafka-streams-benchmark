@@ -21,6 +21,8 @@ import java.util.Properties;
 import java.util.Set;
 
 final class KafkaSupport {
+    static final long COMMIT_INTERVAL_MS = 1_000;
+
     private KafkaSupport() {}
 
     static void awaitBrokerCount(Config config) throws Exception {
@@ -95,6 +97,7 @@ final class KafkaSupport {
         properties.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.StringSerde.class);
         properties.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, processingThreads);
         properties.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, config.processingGuarantee());
+        properties.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, COMMIT_INTERVAL_MS);
         properties.put(StreamsConfig.STATE_DIR_CONFIG,
                 Path.of(System.getProperty("java.io.tmpdir"), runId).toString());
         properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");

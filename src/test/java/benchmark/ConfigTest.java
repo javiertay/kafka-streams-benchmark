@@ -23,14 +23,14 @@ class ConfigTest {
         env.put("KAFKA_BROKER_COUNT", "3");
         env.put("BENCHMARK_PARTITIONS", "1,3");
         env.put("BENCHMARK_SERVICE_INSTANCES", "1,3,6");
-        env.put("BENCHMARK_INPUT_RATES", "100000,1000000");
-        env.put("BENCHMARK_MEASUREMENT_SECONDS", "10");
+        env.put("BENCHMARK_EVENT_COUNT", "500000");
+        env.put("BENCHMARK_WARMUP_EVENT_COUNT", "50000");
         env.put("BENCHMARK_WORKER_URLS", "http://worker-1:8080, http://worker-2:8080");
         env.put("KAFKA_PROPERTY_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM", "https");
         Config config = Config.from(env);
         assertEquals(java.util.List.of(1, 3, 6), config.serviceInstances());
-        assertEquals(java.util.List.of(100_000L, 1_000_000L), config.inputRates());
-        assertEquals(10, config.measurementSeconds());
+        assertEquals(500_000, config.eventCount());
+        assertEquals(50_000, config.warmupEventCount());
         assertEquals(java.util.List.of("http://worker-1:8080", "http://worker-2:8080"), config.workerUrls());
         assertEquals(3, config.brokerCount());
         assertEquals(3, config.replicationFactor());
@@ -68,6 +68,7 @@ class ConfigTest {
         assertEquals("streams-run", streams.get(StreamsConfig.APPLICATION_ID_CONFIG));
         assertEquals(1, streams.get(StreamsConfig.NUM_STREAM_THREADS_CONFIG));
         assertEquals("at_least_once", streams.get(StreamsConfig.PROCESSING_GUARANTEE_CONFIG));
+        assertEquals(KafkaSupport.COMMIT_INTERVAL_MS, streams.get(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG));
         assertEquals(1000, streams.get(StreamsConfig.consumerPrefix(ConsumerConfig.MAX_POLL_RECORDS_CONFIG)));
         assertEquals("all", streams.get(StreamsConfig.producerPrefix(ProducerConfig.ACKS_CONFIG)));
         assertEquals(true, streams.get(StreamsConfig.producerPrefix(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG)));
@@ -93,16 +94,15 @@ class ConfigTest {
                 "KAFKA_SECURITY_PROTOCOL", "HTTP")));
     }
 
-    @Test void rejectsNonPositiveRatesAndOversizedDuration() {
+    @Test void rejectsNonPositiveEventCountAndNegativeWarmupCount() {
         assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
                 "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
                 "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
-                "BENCHMARK_INPUT_RATES", "0")));
+                "BENCHMARK_EVENT_COUNT", "0")));
         assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
                 "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
                 "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
-                "BENCHMARK_INPUT_RATES", "1000000000",
-                "BENCHMARK_MEASUREMENT_SECONDS", "3")));
+                "BENCHMARK_WARMUP_EVENT_COUNT", "-1")));
     }
 
     @Test void rejectsReplicationFactorAboveBrokerCount() {
@@ -123,5 +123,22 @@ class ConfigTest {
                 "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
                 "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
                 "BENCHMARK_PROCESSING_MODE", "unknown")));
+    }
+
+    @Test void requiresEnoughEvenIterationsToBalanceExecutionOrder() {
+        Map<String, String> base = Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
+                "BENCHMARK_ITERATIONS", "1");
+        assertThrows(IllegalArgumentException.class, () -> Config.from(base));
+        assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
+                "BENCHMARK_ITERATIONS", "3")));
+        assertEquals(4, Config.from(Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")).iterations());
+        assertTrue(BenchmarkOrchestrator.streamsFirst(1));
+        assertFalse(BenchmarkOrchestrator.streamsFirst(2));
     }
 }

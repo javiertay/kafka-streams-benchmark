@@ -72,8 +72,7 @@ final class KafkaStreamsProcessor implements ProcessorSession {
                 long started = System.nanoTime();
                 InputEvent input = EventCodec.readInput(record.value());
                 if (!command.runId().equals(input.runId())) return;
-                metrics.ingested(Math.max(0,
-                        (System.currentTimeMillis() - input.generatedTimestamp()) * 1_000_000));
+                metrics.ingested();
                 OutputEvent output = Workload.transform(input, System.currentTimeMillis());
                 consumed.incrementAndGet();
                 context.forward(record.withValue(EventCodec.write(output)));
@@ -103,8 +102,7 @@ final class KafkaStreamsProcessor implements ProcessorSession {
                     publishAggregates(record.timestamp());
                     return;
                 }
-                metrics.ingested(Math.max(0,
-                        (System.currentTimeMillis() - input.generatedTimestamp()) * 1_000_000));
+                metrics.ingested();
                 consumed.incrementAndGet();
                 if (!input.eventId().equals(dedupe.get(input.key()))) {
                     dedupe.put(input.key(), input.eventId());
@@ -148,7 +146,7 @@ final class KafkaStreamsProcessor implements ProcessorSession {
     @Override public ProcessorReport stop() {
         streams.close(Duration.ofSeconds(30));
         resources.close();
-        return new ProcessorReport(consumed.get(), forwarded.get(), metrics.snapshot(), resources.result(),
+        return new ProcessorReport(consumed.get(), forwarded.get(), metrics.snapshot(), resources.result(), resources.samples(),
                 Math.max(0, ResourceSampler.gcCount() - initialGcCount),
                 Math.max(0, ResourceSampler.gcTime() - initialGcTime));
     }

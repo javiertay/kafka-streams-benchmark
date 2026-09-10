@@ -19,17 +19,15 @@ record RuntimeDetails(String javaVersion, String javaVendor, String vmName,
 
 record BenchmarkResult(
         String implementation, String timestamp, String runId, int iteration,
-        int eventCount, int measurementSeconds, int requestedPartitions, int actualPartitions, int payloadBytes,
+        int eventCount, int requestedPartitions, int actualPartitions, int payloadBytes,
         int serviceInstances, java.util.List<Integer> eventsConsumedPerService,
-        long requestedInputRate, double achievedInputRate, double producerFlushSeconds,
-        int backlogAtGenerationEnd, double catchUpSeconds,
-        double ingestionThroughput, Latency ingestionLatency,
-        double processingThroughput, Latency processingLatency,
+        double ingestionElapsedSeconds, double ingestionThroughput,
+        double processingElapsedSeconds, double processingThroughput, Latency processingLatency,
         Latency metadataFlushLatency,
-        double publishingThroughput, Latency publishingLatency,
-        double totalElapsedSeconds, double totalThroughput, Latency endToEndLatency,
+        double publishingElapsedSeconds, double publishingThroughput, Latency publishingLatency,
+        double totalElapsedSeconds, double totalThroughput,
         ResourceUsage resources, Validation validation, RuntimeDetails technicalDetails,
         Map<String, Object> safeConfiguration) {}
 
-record SkippedScenario(int measurementSeconds, int requestedPartitions, int actualPartitions,
-                       int serviceInstances, long requestedInputRate, String reason) {}
+record SkippedScenario(int eventCount, int requestedPartitions, int actualPartitions,
+                       int serviceInstances, String reason) {}

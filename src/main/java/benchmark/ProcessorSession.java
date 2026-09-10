@@ -18,14 +18,11 @@ interface ProcessorSession {
 record WorkerCommand(String implementation, String runId, String groupId, long estimatedEvents) {}
 
 record ProcessorReport(int consumed, int published, MetricsSnapshot metrics, ResourceUsage resources,
-                       long gcCount, long gcTimeMs) {
+                       List<ResourceSample> resourceSamples, long gcCount, long gcTimeMs) {
     static ProcessorReport combine(List<ProcessorReport> reports) {
         return new ProcessorReport(reports.stream().mapToInt(ProcessorReport::consumed).sum(),
                 reports.stream().mapToInt(ProcessorReport::published).sum(), null,
-                new ResourceUsage(reports.stream().mapToDouble(r -> r.resources().averageCpuPercent()).sum(),
-                        reports.stream().mapToDouble(r -> r.resources().peakCpuPercent()).sum(),
-                        reports.stream().mapToDouble(r -> r.resources().averageRamMb()).sum(),
-                        reports.stream().mapToDouble(r -> r.resources().peakRamMb()).sum()),
+                ResourceSampler.aggregate(reports), List.of(),
                 reports.stream().mapToLong(ProcessorReport::gcCount).sum(),
                 reports.stream().mapToLong(ProcessorReport::gcTimeMs).sum());
     }

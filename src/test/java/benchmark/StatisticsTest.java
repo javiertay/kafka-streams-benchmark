@@ -30,4 +30,11 @@ class StatisticsTest {
         metrics.lastProcessNanos.set(2_000_000_000L);
         assertEquals(2, metrics.throughput(metrics.firstProcessNanos, metrics.lastProcessNanos, 3));
     }
+
+    @Test void reportsStageElapsedWallTime() {
+        StageMetrics metrics = new StageMetrics(10);
+        metrics.firstProcessNanos.set(1_000_000_000L);
+        metrics.lastProcessNanos.set(3_500_000_000L);
+        assertEquals(2.5, metrics.elapsedSeconds(metrics.firstProcessNanos, metrics.lastProcessNanos));
+    }
 }

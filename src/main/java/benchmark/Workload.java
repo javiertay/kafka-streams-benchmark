@@ -34,8 +34,8 @@ final class Workload {
                 ? producedSequence - 1 : producedSequence;
     }
 
-    static long eventTime(long sequence, long inputRate) {
-        return sequence * 1_000 / inputRate;
+    static long eventTime(long sequence, long eventCount) {
+        return sequence * AGGREGATION_WINDOW_MS / eventCount;
     }
 
     static String aggregateKey(long eventTime, String key) {

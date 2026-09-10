@@ -8,13 +8,16 @@ import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 final class ResourceSampler implements AutoCloseable {
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final List<Double> cpu = new ArrayList<>();
     private final List<Double> ram = new ArrayList<>();
+    private final List<ResourceSample> samples = new ArrayList<>();
     private final Thread thread;
 
     ResourceSampler() {
@@ -29,8 +32,13 @@ final class ResourceSampler implements AutoCloseable {
     private synchronized void sample() {
         var bean = (OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
         double load = bean.getProcessCpuLoad();
-        if (load >= 0) cpu.add(load * 100);
-        ram.add(residentMemoryMb());
+        double memory = residentMemoryMb();
+        if (load >= 0) {
+            double percent = load * 100;
+            cpu.add(percent);
+            samples.add(new ResourceSample(System.currentTimeMillis(), percent, memory));
+        }
+        ram.add(memory);
     }
 
     private double residentMemoryMb() {
@@ -53,6 +61,41 @@ final class ResourceSampler implements AutoCloseable {
                 ram.stream().mapToDouble(Double::doubleValue).max().orElse(0));
     }
 
+    synchronized List<ResourceSample> samples() { return List.copyOf(samples); }
+
+    static ResourceUsage aggregate(List<ProcessorReport> reports) {
+        if (reports.isEmpty()) return new ResourceUsage(0, 0, 0, 0);
+        Map<Long, double[]> buckets = new HashMap<>();
+        for (ProcessorReport report : reports) {
+            Map<Long, ResourceSample> workerBuckets = new HashMap<>();
+            for (ResourceSample sample : report.resourceSamples()) {
+                workerBuckets.put(sample.epochMillis() / 100, sample);
+            }
+            for (Map.Entry<Long, ResourceSample> entry : workerBuckets.entrySet()) {
+                long bucket = entry.getKey();
+                ResourceSample sample = entry.getValue();
+                double[] totals = buckets.computeIfAbsent(bucket, ignored -> new double[3]);
+                totals[0] += sample.cpuPercent();
+                totals[1] += sample.ramMb();
+                totals[2]++;
+            }
+        }
+        List<double[]> simultaneous = buckets.values().stream()
+                .filter(values -> values[2] == reports.size()).toList();
+        if (simultaneous.isEmpty()) {
+            return new ResourceUsage(
+                    reports.stream().mapToDouble(r -> r.resources().averageCpuPercent()).sum(),
+                    reports.stream().mapToDouble(r -> r.resources().peakCpuPercent()).sum(),
+                    reports.stream().mapToDouble(r -> r.resources().averageRamMb()).sum(),
+                    reports.stream().mapToDouble(r -> r.resources().peakRamMb()).sum());
+        }
+        return new ResourceUsage(
+                simultaneous.stream().mapToDouble(values -> values[0]).average().orElse(0),
+                simultaneous.stream().mapToDouble(values -> values[0]).max().orElse(0),
+                simultaneous.stream().mapToDouble(values -> values[1]).average().orElse(0),
+                simultaneous.stream().mapToDouble(values -> values[1]).max().orElse(0));
+    }
+
     @Override public void close() {
         running.set(false);
         thread.interrupt();
@@ -69,3 +112,5 @@ final class ResourceSampler implements AutoCloseable {
                 .filter(value -> value >= 0).sum();
     }
 }
+
+record ResourceSample(long epochMillis, double cpuPercent, double ramMb) {}

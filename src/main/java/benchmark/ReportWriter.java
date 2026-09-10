@@ -33,16 +33,15 @@ final class ReportWriter {
             Scenario scenario = scenarioList.get(index);
             tabs.append("<button class=\"config-tab\" role=\"tab\" aria-controls=\"scenario-")
                     .append(index).append("\" aria-selected=\"").append(index == 0).append("\" onclick=\"showScenario(")
-                    .append(index).append(")\">").append(scenario.measurementSeconds()).append("s · ")
-                    .append(rate(scenario.inputRate())).append(" · ").append(scenario.actual()).append("p · ")
+                    .append(index).append(")\">").append(number(scenario.eventCount())).append(" events · ")
+                    .append(scenario.actual()).append("p · ")
                     .append(services(scenario.serviceInstances())).append("</button>");
             scenarios.append(comparison(scenario, results, index, index == 0));
         }
         StringBuilder skipHtml = new StringBuilder();
-        skipped.forEach(skip -> skipHtml.append("<li><strong>").append(skip.measurementSeconds()).append(" seconds, ")
+        skipped.forEach(skip -> skipHtml.append("<li><strong>").append(number(skip.eventCount())).append(" events, ")
                 .append(skip.requestedPartitions()).append(" requested partitions, ")
-                .append(services(skip.serviceInstances())).append(", ")
-                .append(rate(skip.requestedInputRate())).append(":</strong> ")
+                .append(services(skip.serviceInstances())).append(":</strong> ")
                 .append(escape(skip.reason())).append("</li>"));
         return """
                 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -55,13 +54,13 @@ final class ReportWriter {
                 details{margin-top:1rem}code{background:#edf1f7;padding:.1rem .3rem;border-radius:4px}@media(max-width:700px){main{padding:.7rem}.card{overflow-x:auto}th,td{white-space:nowrap}}
                 .config-tabs{display:flex;gap:.5rem;overflow-x:auto;padding:.25rem 0 1rem}.config-tab{white-space:nowrap;border:1px solid #aeb9ca;border-radius:999px;background:#fff;padding:.6rem .9rem;cursor:pointer}.config-tab[aria-selected=true]{background:#3157c8;color:#fff;border-color:#3157c8}.scenario-panel[hidden]{display:none}
                 </style></head><body><main>
-                <header><h1>Kafka Streams vs Plain Java</h1><p class="lead purpose"><strong>What performance are we testing?</strong> This benchmark measures how quickly each implementation ingests, processes, and publishes the same deterministic JSON events, plus total throughput, end-to-end latency, CPU, and RAM.</p>
+                <header><h1>Kafka Streams vs Plain Java</h1><p class="lead purpose"><strong>What performance are we testing?</strong> This benchmark preloads the same fixed number of deterministic JSON records, then measures how quickly each implementation ingests, processes, and publishes them, plus CPU and RAM. Input generation is excluded.</p>
                 <p class="lead"><strong>Why are we doing this?</strong> To make an evidence-based choice between Kafka Streams and direct <code>KafkaConsumer</code>/<code>KafkaProducer</code> code under the same Java 25 runtime, Kafka cluster, workload, partitions, processing logic, and resource limits. Results describe this environment only; they are not universal performance claims.</p>
                 """ + environment + """
                 <p class="muted">Green marks the better displayed value. Values that round to the same display precision are ties. Invalid runs never receive a winner.</p></header>
                 <section class="card"><h2>Overall summary</h2><p class="verdict"><strong>""" + escape(overallSummary(results)) + """
-                </strong></p><p class="muted">Each complete, valid configuration gets one vote based on median end-to-end input throughput. Workloads are not averaged together.</p></section>
-                <section class="card"><h2>How to read the results</h2><p><strong>Achieved input rate:</strong> what the independent generator actually delivered during the fixed window. <strong>Expected outputs:</strong> equals generated inputs in transform mode, but is the number of final key/window aggregates in metadata mode. <strong>Backlog at generation end:</strong> expected outputs not yet observed when that window closed; near zero means the processors kept up or emitted promptly. <strong>Catch-up time:</strong> time needed to publish the remaining outputs. <strong>CPU/RAM:</strong> totals across processor services only; generator and observer resources are excluded.</p></section>
+                </strong></p><p class="muted">Each complete, valid configuration gets one vote based on median total processing throughput. Workloads are not averaged together.</p></section>
+                <section class="card"><h2>How to read the results</h2><p><strong>Fixed input records:</strong> the complete JSON dataset placed on Kafka before processor timing begins. <strong>Expected outputs:</strong> equals input records in transform mode, but is the number of final key/window aggregates in metadata mode. <strong>Total elapsed time:</strong> worker launch until all expected outputs are observed. <strong>CPU/RAM:</strong> totals across processor services only; the preloader and observer are excluded.</p></section>
                 """ + (tabs.isEmpty() ? "" : "<nav class=\"config-tabs\" role=\"tablist\" aria-label=\"Benchmark configurations\">" + tabs + "</nav>")
                 + scenarios + (skipHtml.isEmpty() ? "" : "<section class=\"card\"><h2>Skipped scenarios</h2><ul>" + skipHtml + "</ul></section>") + """
                 <section class="card"><h2>Advanced JVM metrics</h2><p>Runtime, GC, heap, and safe Kafka configuration are available in <a href="summary.json">summary.json</a> and the per-run raw JSON files. Credentials are never written.</p>
@@ -76,18 +75,14 @@ final class ReportWriter {
         if (streamsRuns.isEmpty() || plainRuns.isEmpty()) return "";
         BenchmarkResult streams = Statistics.medianBy(streamsRuns, BenchmarkResult::totalThroughput);
         BenchmarkResult plain = Statistics.medianBy(plainRuns, BenchmarkResult::totalThroughput);
-        boolean valid = streamsRuns.stream().allMatch(r -> r.validation().valid()) && plainRuns.stream().allMatch(r -> r.validation().valid());
+        boolean valid = streamsRuns.stream().allMatch(r -> r.validation().valid())
+                && plainRuns.stream().allMatch(r -> r.validation().valid());
         StringBuilder rows = new StringBuilder();
-        rows.append(neutralRow("Events generated", streams.eventCount(), plain.eventCount(), ""));
+        rows.append(neutralRow("Fixed input records", streams.eventCount(), plain.eventCount(), ""));
         rows.append(neutralRow("Expected outputs", streams.validation().expected(), plain.validation().expected(), ""));
-        rows.append(neutralRow("Achieved input rate", streams.achievedInputRate(), plain.achievedInputRate(), "/s"));
-        rows.append(neutralRow("Producer flush time", streams.producerFlushSeconds(), plain.producerFlushSeconds(), " s"));
-        rows.append(metricRow("Backlog at generation end", backlogPercent(streams), backlogPercent(plain), false, "%", valid));
-        rows.append(metricRow("Catch-up time", streams.catchUpSeconds(), plain.catchUpSeconds(), false, " s", valid));
+        rows.append(metricRow("Ingestion elapsed time", streams.ingestionElapsedSeconds(), plain.ingestionElapsedSeconds(), false, " s", valid));
         rows.append(metricRow("Ingestion throughput", streams.ingestionThroughput(), plain.ingestionThroughput(), true, "/s", valid));
-        rows.append(metricRow("Ingestion p50", streams.ingestionLatency().p50Ms(), plain.ingestionLatency().p50Ms(), false, " ms", valid));
-        rows.append(metricRow("Ingestion p95", streams.ingestionLatency().p95Ms(), plain.ingestionLatency().p95Ms(), false, " ms", valid));
-        rows.append(metricRow("Ingestion p99", streams.ingestionLatency().p99Ms(), plain.ingestionLatency().p99Ms(), false, " ms", valid));
+        rows.append(metricRow("Processing elapsed time", streams.processingElapsedSeconds(), plain.processingElapsedSeconds(), false, " s", valid));
         rows.append(metricRow("Processing throughput", streams.processingThroughput(), plain.processingThroughput(), true, "/s", valid));
         rows.append(metricRow("Processing p50", streams.processingLatency().p50Ms(), plain.processingLatency().p50Ms(), false, " ms", valid));
         rows.append(metricRow("Processing p95", streams.processingLatency().p95Ms(), plain.processingLatency().p95Ms(), false, " ms", valid));
@@ -97,25 +92,22 @@ final class ReportWriter {
             rows.append(metricRow("Metadata flush p95", streams.metadataFlushLatency().p95Ms(), plain.metadataFlushLatency().p95Ms(), false, " ms", valid));
             rows.append(metricRow("Metadata flush p99", streams.metadataFlushLatency().p99Ms(), plain.metadataFlushLatency().p99Ms(), false, " ms", valid));
         }
+        rows.append(metricRow("Publishing elapsed time", streams.publishingElapsedSeconds(), plain.publishingElapsedSeconds(), false, " s", valid));
         rows.append(metricRow("Publishing throughput", streams.publishingThroughput(), plain.publishingThroughput(), true, "/s", valid));
         rows.append(metricRow("Publishing p99", streams.publishingLatency().p99Ms(), plain.publishingLatency().p99Ms(), false, " ms", valid));
         rows.append(metricRow("Total elapsed time", streams.totalElapsedSeconds(), plain.totalElapsedSeconds(), false, " s", valid));
-        rows.append(metricRow("End-to-end input throughput", streams.totalThroughput(), plain.totalThroughput(), true, "/s", valid));
-        rows.append(metricRow("End-to-end p50", streams.endToEndLatency().p50Ms(), plain.endToEndLatency().p50Ms(), false, " ms", valid));
-        rows.append(metricRow("End-to-end p95", streams.endToEndLatency().p95Ms(), plain.endToEndLatency().p95Ms(), false, " ms", valid));
-        rows.append(metricRow("End-to-end p99", streams.endToEndLatency().p99Ms(), plain.endToEndLatency().p99Ms(), false, " ms", valid));
+        rows.append(metricRow("Total processing throughput", streams.totalThroughput(), plain.totalThroughput(), true, "/s", valid));
         rows.append(metricRow("Average CPU", streams.resources().averageCpuPercent(), plain.resources().averageCpuPercent(), false, "%", valid));
         rows.append(metricRow("Peak CPU", streams.resources().peakCpuPercent(), plain.resources().peakCpuPercent(), false, "%", valid));
         rows.append(metricRow("Average RAM", streams.resources().averageRamMb(), plain.resources().averageRamMb(), false, " MB", valid));
         rows.append(metricRow("Peak RAM", streams.resources().peakRamMb(), plain.resources().peakRamMb(), false, " MB", valid));
-        String range = String.format(Locale.ROOT, "Median of %d/%d iterations; end-to-end input throughput ranges %.1f–%.1f/s vs %.1f–%.1f/s.",
+        String range = String.format(Locale.ROOT, "Median of %d/%d iterations; total processing throughput ranges %.1f–%.1f/s vs %.1f–%.1f/s.",
                 streamsRuns.size(), plainRuns.size(), min(streamsRuns), max(streamsRuns), min(plainRuns), max(plainRuns));
-        String status = valid ? "<span class=\"valid\">Valid: all inputs were consumed and all expected outputs were published and observed once.</span>" :
-                "<div class=\"invalid\">Invalid: output validation failed. No winner is highlighted.</div>";
+        String status = valid ? "<span class=\"valid\">Valid: both implementations processed the same fixed input count and output validation passed.</span>"
+                : "<div class=\"invalid\">Invalid: output validation failed. No winner is highlighted.</div>";
         return "<section class=\"card scenario-panel\" id=\"scenario-" + index + "\" role=\"tabpanel\""
-                + (visible ? "" : " hidden") + "><h2>" + scenario.measurementSeconds() + " seconds · "
-                + scenario.actual() + " partitions · " + services(scenario.serviceInstances()) + "</h2>"
-                + "<p><strong>Requested input rate:</strong> " + rate(scenario.inputRate()) + "</p><p>"
+                + (visible ? "" : " hidden") + "><h2>" + number(scenario.eventCount()) + " events · "
+                + scenario.actual() + " partitions · " + services(scenario.serviceInstances()) + "</h2><p>"
                 + status + "</p><p><strong>Overall result:</strong> "
                 + winnerSummary(streams.totalThroughput(), plain.totalThroughput(), valid)
                 + "</p><p><strong>Events consumed per service:</strong> Kafka Streams "
@@ -132,7 +124,7 @@ final class ReportWriter {
         double slower = Math.min(streams, plain);
         double difference = slower == 0 ? 0 : (Math.max(streams, plain) - slower) / slower * 100;
         String winner = streams > plain ? "Kafka Streams" : "Plain Java";
-        return String.format(Locale.ROOT, "%s had %.1f%% higher end-to-end input throughput.", winner, difference);
+        return String.format(Locale.ROOT, "%s had %.1f%% higher total processing throughput.", winner, difference);
     }
 
     static String overallSummary(List<BenchmarkResult> results) {
@@ -190,25 +182,21 @@ final class ReportWriter {
 
     private static long rounded(double value) { return Math.round(value * 100); }
     private static List<Scenario> scenarios(List<BenchmarkResult> results) {
-        return results.stream().map(result -> new Scenario(result.measurementSeconds(),
-                        result.requestedPartitions(), result.actualPartitions(), result.serviceInstances(),
-                        result.requestedInputRate()))
+        return results.stream().map(result -> new Scenario(result.eventCount(),
+                        result.requestedPartitions(), result.actualPartitions(), result.serviceInstances()))
                 .distinct().sorted(Comparator.comparingInt(Scenario::partitions)
                         .thenComparingInt(Scenario::serviceInstances)
-                        .thenComparingLong(Scenario::inputRate)
-                        .thenComparingInt(Scenario::measurementSeconds)).toList();
+                        .thenComparingInt(Scenario::eventCount)).toList();
     }
     private static List<BenchmarkResult> matching(List<BenchmarkResult> all, Scenario scenario, String implementation) {
-        return all.stream().filter(r -> r.measurementSeconds() == scenario.measurementSeconds()
+        return all.stream().filter(r -> r.eventCount() == scenario.eventCount()
                 && r.requestedPartitions() == scenario.partitions()
                 && r.serviceInstances() == scenario.serviceInstances()
-                && r.requestedInputRate() == scenario.inputRate()
                 && r.implementation().equals(implementation)).toList();
     }
     private static double min(List<BenchmarkResult> values) { return values.stream().mapToDouble(BenchmarkResult::totalThroughput).min().orElse(0); }
     private static double max(List<BenchmarkResult> values) { return values.stream().mapToDouble(BenchmarkResult::totalThroughput).max().orElse(0); }
     private static String number(long number) { return String.format(Locale.ROOT, "%,d", number); }
-    private static String rate(long inputRate) { return inputRate == 0 ? "unthrottled" : number(inputRate) + " events/s"; }
     private static String services(int count) { return count + (count == 1 ? " service" : " services"); }
     private static String environmentSummary(List<BenchmarkResult> results) {
         if (results.isEmpty()) return "";
@@ -230,15 +218,11 @@ final class ReportWriter {
     }
     private static String plural(int count) { return count == 1 ? "" : "s"; }
     private static String distribution(List<Integer> counts) { return counts.stream().map(ReportWriter::number).collect(java.util.stream.Collectors.joining(" / ")); }
-    private static double backlogPercent(BenchmarkResult result) {
-        return result.validation().expected() == 0 ? 0
-                : result.backlogAtGenerationEnd() * 100.0 / result.validation().expected();
-    }
     private static boolean isMetadata(BenchmarkResult result) {
         return "metadata".equals(result.safeConfiguration().get("processingMode"));
     }
     private static String escape(String value) { return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;"); }
 
-    private record Scenario(int measurementSeconds, int partitions, int actual, int serviceInstances, long inputRate) {}
+    private record Scenario(int eventCount, int partitions, int actual, int serviceInstances) {}
     private record Summary(List<BenchmarkResult> results, List<SkippedScenario> skippedScenarios) {}
 }

@@ -25,6 +25,8 @@ class WorkloadTest {
         assertEquals(4, Workload.metadataSequence(5));
         assertEquals(6, Workload.metadataSequence(6));
         assertEquals("2:key-7", Workload.aggregateKey(2_500, "key-7"));
+        assertEquals(0, Workload.eventTime(0, 500_000));
+        assertEquals(999, Workload.eventTime(499_999, 500_000));
 
         InputEvent input = Workload.event("run", 4, 4, 10, 42, 100);
         OutputEvent first = Workload.aggregate(input, null, 200);

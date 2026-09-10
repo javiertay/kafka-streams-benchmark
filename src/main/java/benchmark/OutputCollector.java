@@ -68,7 +68,6 @@ final class OutputCollector implements AutoCloseable {
                     observed.incrementAndGet();
                     long nowEpochMillis = System.currentTimeMillis();
                     metrics.published(Math.max(0, (nowEpochMillis - output.processedTimestamp()) * 1_000_000));
-                    metrics.endToEnd(Math.max(0, (nowEpochMillis - output.generatedTimestamp()) * 1_000_000));
                 }
             }
         } catch (org.apache.kafka.common.errors.WakeupException ignored) {
