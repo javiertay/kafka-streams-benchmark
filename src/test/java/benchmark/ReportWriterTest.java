@@ -68,9 +68,12 @@ class ReportWriterTest {
         assertTrue(html.contains("only this broker-count environment"));
         assertTrue(html.contains("Seeded variable-rate input"));
         assertTrue(html.contains("Expected outputs"));
-        assertTrue(html.contains("Metadata flush p99"));
+        assertFalse(html.contains("Metadata flush"));
         assertTrue(html.contains("Scheduled input records"));
         assertTrue(html.contains("Total processing throughput"));
+        assertTrue(html.contains("Consumed input records divided by total elapsed time"));
+        assertTrue(html.contains("class=\"metric-help\""));
+        assertTrue(html.contains("Hover over or focus the information marker"));
         assertEquals(2, html.split("role=\"tab\"", -1).length - 1);
         assertFalse(html.contains("Generation throughput"));
         assertFalse(html.contains("Catch-up time"));

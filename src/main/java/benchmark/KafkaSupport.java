@@ -9,6 +9,7 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.GroupState;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -127,7 +128,9 @@ final class KafkaSupport {
         try (AdminClient admin = AdminClient.create(config.kafkaProperties())) {
             while (System.nanoTime() < deadline) {
                 var description = admin.describeConsumerGroups(List.of(group)).all().get().get(group);
-                if (description != null && description.members().size() == expected) stableChecks++;
+                if (description != null
+                        && description.members().size() == expected
+                        && description.groupState() == GroupState.STABLE) stableChecks++;
                 else stableChecks = 0;
                 if (stableChecks == 4) return;
                 Thread.sleep(250);

@@ -83,4 +83,19 @@ final class Workload {
         }
     }
 
+    static final class PartitionedWindows {
+        private final java.util.Map<PartitionWindow, WindowAccumulator> windows = new java.util.HashMap<>();
+
+        void add(int partition, InputEvent input) {
+            windows.computeIfAbsent(new PartitionWindow(partition, input.windowIndex()),
+                    ignored -> new WindowAccumulator()).add(input);
+        }
+
+        WindowAccumulator remove(int partition, long window) {
+            return windows.remove(new PartitionWindow(partition, window));
+        }
+
+        private record PartitionWindow(int partition, long window) {}
+    }
+
 }

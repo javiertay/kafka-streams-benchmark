@@ -27,7 +27,7 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
     private final KafkaProducer<String, String> producer;
     private final KafkaConsumer<String, String> consumer;
     private final Thread consumerThread;
-    private final Map<Long, Workload.WindowAccumulator> windows = new HashMap<>();
+    private final Workload.PartitionedWindows windows = new Workload.PartitionedWindows();
     private final Map<Long, Workload.WindowAccumulator> globalWindows = new HashMap<>();
     private final Map<Long, Integer> receivedParts = new HashMap<>();
 
@@ -64,6 +64,13 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
         } catch (WakeupException ignored) {
             if (running.get()) throw ignored;
         } finally {
+            try {
+                producer.flush();
+                consumer.commitSync();
+            } catch (RuntimeException exception) {
+                System.err.println("[plain-java] Final offset commit failed during shutdown: "
+                        + exception.getMessage());
+            }
             consumer.close();
         }
     }
@@ -85,7 +92,7 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
         metrics.ingested();
         consumed.incrementAndGet();
         if (config.processingMode() == ProcessingMode.METADATA) {
-            windows.computeIfAbsent(input.windowIndex(), ignored -> new Workload.WindowAccumulator()).add(input);
+            windows.add(record.partition(), input);
             metrics.processed(System.nanoTime() - started);
             return;
         }
@@ -96,7 +103,7 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
 
     private void publishPartial(WorkerCommand command, long window, int partition) {
         long started = System.nanoTime();
-        Workload.WindowAccumulator aggregate = windows.remove(window);
+        Workload.WindowAccumulator aggregate = windows.remove(partition, window);
         if (aggregate == null) aggregate = new Workload.WindowAccumulator();
         PartialAggregate partial = aggregate.partial(command.runId(), window, partition);
         producer.send(new ProducerRecord<>(config.partialTopic(), Long.toString(window), EventCodec.write(partial)));
@@ -140,4 +147,5 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
                 Math.max(0, ResourceSampler.gcCount() - initialGcCount),
                 Math.max(0, ResourceSampler.gcTime() - initialGcTime));
     }
+
 }

@@ -13,7 +13,6 @@ The benchmark asks: for the same deterministic variable-rate input schedule, Jav
 
 - **Ingestion elapsed time and throughput:** receiving the complete live input schedule from Kafka.
 - **Stage elapsed time and throughput:** ingestion, processing, and publishing wall times are shown directly. Per-record processing p50/p95/p99 is identically timed from JSON decoding through business logic and output handoff for both implementations.
-- **Metadata flush p50/p95/p99 latency:** partition-local consolidation and global payload merge at each configured output interval.
 - **Publishing throughput and p50/p95/p99 latency:** time from processing completion until the output observer receives the record. This is publish-to-observe latency, not asynchronous API submission time. Kafka Streams does not expose per-record producer callbacks, so this definition is used for both implementations.
 - **Total elapsed time and input throughput:** processor worker launch until all expected outputs are observed. Throughput uses consumed inputs, not output count, so suppressed metadata output does not artificially lower processing capacity.
 - **Average/peak CPU and RAM:** time-aligned aggregate samples across processor service JVMs only; generator and observer resources are excluded. Peaks are simultaneous totals, not sums of independently occurring per-service peaks.

@@ -51,6 +51,7 @@ final class ReportWriter {
                 h1{margin-top:0}.lead,.verdict{font-size:1.1rem;line-height:1.55;max-width:78ch}.purpose{border-left:5px solid #3157c8;padding-left:1rem}
                 table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{text-align:right;padding:.65rem;border-bottom:1px solid #e5eaf1}th:first-child,td:first-child{text-align:left}
                 .better{background:#d9f6e5;color:#126234;font-weight:700}.invalid{background:#fff3cd;color:#664d03;padding:.7rem;border-radius:8px}.valid{color:#126234}small,.muted{color:#596579}
+                .metric-help{cursor:help;text-decoration:underline dotted;text-underline-offset:.2em}.metric-help:focus{outline:2px solid #3157c8;outline-offset:2px;border-radius:3px}
                 details{margin-top:1rem}code{background:#edf1f7;padding:.1rem .3rem;border-radius:4px}@media(max-width:700px){main{padding:.7rem}.card{overflow-x:auto}th,td{white-space:nowrap}}
                 .config-tabs{display:flex;gap:.5rem;overflow-x:auto;padding:.25rem 0 1rem}.config-tab{white-space:nowrap;border:1px solid #aeb9ca;border-radius:999px;background:#fff;padding:.6rem .9rem;cursor:pointer}.config-tab[aria-selected=true]{background:#3157c8;color:#fff;border-color:#3157c8}.scenario-panel[hidden]{display:none}
                 </style></head><body><main>
@@ -64,7 +65,7 @@ final class ReportWriter {
                 """ + (tabs.isEmpty() ? "" : "<nav class=\"config-tabs\" role=\"tablist\" aria-label=\"Benchmark configurations\">" + tabs + "</nav>")
                 + scenarios + (skipHtml.isEmpty() ? "" : "<section class=\"card\"><h2>Skipped scenarios</h2><ul>" + skipHtml + "</ul></section>") + """
                 <section class="card"><h2>Advanced JVM metrics</h2><p>Runtime, GC, heap, and safe Kafka configuration are available in <a href="summary.json">summary.json</a> and the per-run raw JSON files. Credentials are never written.</p>
-                <details><summary>Measurement notes and limitations</summary><p>Both implementations replay the same seeded rate schedule. Processing is timed identically from JSON decoding through business logic and output handoff. Metadata flush latency includes partition-local payload creation and the global merge. Kafka Streams does not expose a per-record producer acknowledgement callback, so publishing latency is measured from business-logic completion until the output observer receives the record. Latency percentiles use at most 100,000 evenly spaced samples per stage. Historical records are filtered by unique run ID.</p></details></section>
+                <details><summary>Measurement notes and limitations</summary><p>Both implementations replay the same seeded rate schedule. Processing is timed identically from JSON decoding through business logic and output handoff. Kafka Streams does not expose a per-record producer acknowledgement callback, so publishing latency is measured from business-logic completion until the output observer receives the record. Latency percentiles use at most 100,000 evenly spaced samples per stage. Historical records are filtered by unique run ID.</p></details></section>
                 </main><script>function showScenario(n){document.querySelectorAll('.scenario-panel').forEach((p,i)=>p.hidden=i!==n);document.querySelectorAll('.config-tab').forEach((b,i)=>b.setAttribute('aria-selected',i===n))}</script></body></html>
                 """;
     }
@@ -89,11 +90,6 @@ final class ReportWriter {
         rows.append(metricRow("Processing p50", streams.processingLatency().p50Ms(), plain.processingLatency().p50Ms(), false, " ms", valid));
         rows.append(metricRow("Processing p95", streams.processingLatency().p95Ms(), plain.processingLatency().p95Ms(), false, " ms", valid));
         rows.append(metricRow("Processing p99", streams.processingLatency().p99Ms(), plain.processingLatency().p99Ms(), false, " ms", valid));
-        if (isMetadata(streams)) {
-            rows.append(metricRow("Metadata flush p50", streams.metadataFlushLatency().p50Ms(), plain.metadataFlushLatency().p50Ms(), false, " ms", valid));
-            rows.append(metricRow("Metadata flush p95", streams.metadataFlushLatency().p95Ms(), plain.metadataFlushLatency().p95Ms(), false, " ms", valid));
-            rows.append(metricRow("Metadata flush p99", streams.metadataFlushLatency().p99Ms(), plain.metadataFlushLatency().p99Ms(), false, " ms", valid));
-        }
         rows.append(metricRow("Publishing elapsed time", streams.publishingElapsedSeconds(), plain.publishingElapsedSeconds(), false, " s", valid));
         rows.append(metricRow("Publishing throughput", streams.publishingThroughput(), plain.publishingThroughput(), true, "/s", valid));
         rows.append(metricRow("Publishing p99", streams.publishingLatency().p99Ms(), plain.publishingLatency().p99Ms(), false, " ms", valid));
@@ -116,7 +112,8 @@ final class ReportWriter {
                 + distribution(streams.eventsConsumedPerService()) + "; Plain Java "
                 + distribution(plain.eventsConsumedPerService())
                 + "</p><p class=\"muted\">" + range
-                + "</p><table><thead><tr><th>Metric</th><th>Kafka Streams</th><th>Plain Java</th>"
+                + "</p><p class=\"muted\">Hover over or focus the information marker beside a metric to see how it is measured.</p>"
+                + "<table><thead><tr><th>Metric</th><th>Kafka Streams</th><th>Plain Java</th>"
                 + "</tr></thead><tbody>" + rows + "</tbody></table></section>";
     }
 
@@ -174,12 +171,42 @@ final class ReportWriter {
             rightClass = leftWins ? "" : " class=\"better\"";
         }
         return String.format(Locale.ROOT, "<tr><td>%s</td><td%s>%,.2f%s</td><td%s>%,.2f%s</td></tr>",
-                escape(label), leftClass, left, suffix, rightClass, right, suffix);
+                metricLabel(label), leftClass, left, suffix, rightClass, right, suffix);
     }
 
     private static String neutralRow(String label, double left, double right, String suffix) {
         return String.format(Locale.ROOT, "<tr><td>%s</td><td>%,.2f%s</td><td>%,.2f%s</td></tr>",
-                escape(label), left, suffix, right, suffix);
+                metricLabel(label), left, suffix, right, suffix);
+    }
+
+    private static String metricLabel(String label) {
+        String explanation = switch (label) {
+            case "Scheduled input records" -> "Number of data records produced by the deterministic input schedule; interval marker records are excluded.";
+            case "Run duration" -> "Configured time during which the generator streams the variable-rate input schedule; warm-up is separate.";
+            case "Output interval" -> "Configured number of seconds consolidated into each metadata output payload.";
+            case "Expected outputs" -> "Number of validated outputs required for completion; metadata mode expects one payload per output interval.";
+            case "Ingestion elapsed time" -> "Wall-clock span from the first matching input accepted by any worker to the last matching input accepted.";
+            case "Ingestion throughput" -> "Consumed input records divided by ingestion elapsed time.";
+            case "Processing elapsed time" -> "Wall-clock span from the first input processing completion to the last, aggregated across worker services.";
+            case "Processing throughput" -> "Consumed input records divided by processing elapsed time.";
+            case "Processing p50" -> "Median per-input time from before JSON decoding through deduplication and accumulation or transformation.";
+            case "Processing p95" -> "95th-percentile per-input time from before JSON decoding through deduplication and accumulation or transformation.";
+            case "Processing p99" -> "99th-percentile per-input time from before JSON decoding through deduplication and accumulation or transformation.";
+            case "Publishing elapsed time" -> "Wall-clock span from the first expected output observed on Kafka to the last expected output observed.";
+            case "Publishing throughput" -> "Observed output records divided by publishing elapsed time.";
+            case "Publishing p99" -> "99th-percentile time from final output payload creation until the observer consumes it from Kafka.";
+            case "Total elapsed time" -> "Time from starting input generation until every expected output is observed; worker startup and shutdown are excluded.";
+            case "Total processing throughput" -> "Consumed input records divided by total elapsed time, including input pacing, consolidation, publication, and final output drain.";
+            case "Average CPU" -> "Time-aligned average CPU usage summed across processor service JVMs; generator and observer are excluded.";
+            case "Peak CPU" -> "Highest time-aligned total CPU usage across processor service JVMs; generator and observer are excluded.";
+            case "Average RAM" -> "Time-aligned average resident memory summed across processor service JVMs; generator and observer are excluded.";
+            case "Peak RAM" -> "Highest time-aligned total resident memory across processor service JVMs; generator and observer are excluded.";
+            default -> null;
+        };
+        if (explanation == null) return escape(label);
+        return "<span class=\"metric-help\" tabindex=\"0\" title=\"" + escape(explanation)
+                + "\" aria-label=\"" + escape(label + ": " + explanation) + "\">"
+                + escape(label) + " <span aria-hidden=\"true\">&#9432;</span></span>";
     }
 
     private static long rounded(double value) { return Math.round(value * 100); }
@@ -223,9 +250,6 @@ final class ReportWriter {
     }
     private static String plural(int count) { return count == 1 ? "" : "s"; }
     private static String distribution(List<Integer> counts) { return counts.stream().map(ReportWriter::number).collect(java.util.stream.Collectors.joining(" / ")); }
-    private static boolean isMetadata(BenchmarkResult result) {
-        return "metadata".equals(result.safeConfiguration().get("processingMode"));
-    }
     private static String escape(String value) { return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;"); }
 
     private record Scenario(int eventCount, int durationSeconds, int outputIntervalSeconds,

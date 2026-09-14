@@ -69,9 +69,18 @@ final class DistributedWorkers implements AutoCloseable {
     List<ProcessorReport> stop() throws Exception {
         if (stopped) return List.of();
         stopped = true;
-        List<ProcessorReport> reports = new ArrayList<>();
-        for (String url : urls) reports.add(JSON.readValue(post(url + "/stop", ""), ProcessorReport.class));
-        return reports;
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var stops = urls.stream()
+                    .map(url -> executor.submit(() ->
+                            JSON.readValue(post(url + "/stop", ""), ProcessorReport.class)))
+                    .toList();
+            List<ProcessorReport> reports = new ArrayList<>(stops.size());
+            for (var stop : stops) reports.add(stop.get());
+            return reports;
+        } catch (ExecutionException exception) {
+            if (exception.getCause() instanceof Exception cause) throw cause;
+            throw exception;
+        }
     }
 
     private void stopStartedPeers() {

@@ -52,4 +52,23 @@ class WorkloadTest {
         assertEquals(10_000, payload.windowStartMillis());
         assertEquals(15_000, payload.windowEndMillis());
     }
+
+    @Test void partitionMarkerDoesNotFlushAnotherPartitionsDuplicateState() {
+        InputEvent partitionZero = Workload.event("run", 0, 0, 0, 8, 10, 42, 100);
+        InputEvent partitionOne = Workload.event("run", 1, 1, 0, 8, 10, 42, 101);
+        InputEvent partitionOneDuplicate = new InputEvent(partitionOne.eventId(), "run", 2, 0,
+                partitionOne.key(), 102, partitionOne.payload());
+        Workload.PartitionedWindows windows = new Workload.PartitionedWindows();
+        windows.add(0, partitionZero);
+        windows.add(1, partitionOne);
+
+        PartialAggregate first = windows.remove(0, 0).partial("run", 0, 0);
+        windows.add(1, partitionOneDuplicate);
+        PartialAggregate second = windows.remove(1, 0).partial("run", 0, 1);
+
+        assertEquals(1, first.totalInputCount());
+        assertEquals(2, second.totalInputCount());
+        assertEquals(1, second.uniqueEventCount());
+        assertEquals(1, second.duplicateCount());
+    }
 }
