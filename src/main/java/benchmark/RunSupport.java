@@ -14,8 +14,11 @@ final class RunSupport {
 
     static Generation generate(Config config, String runId, int durationSeconds, long seed,
                                int partitions) throws Exception {
+        if (config.processingMode() == ProcessingMode.VEHICLE_CONGESTION)
+            return generateVehicleCongestion(config, runId, durationSeconds);
         AtomicReference<Exception> failure = new AtomicReference<>();
-        Map<Long, Workload.WindowAccumulator> expectedWindows = new HashMap<>();
+        Map<Long, Workload.ExpectedWindowAccumulator> expectedWindows = new HashMap<>();
+        Map<Integer, String> expectedAggregates = new HashMap<>();
         java.util.List<Integer> schedule = Workload.inputSchedule(durationSeconds,
                 config.minInputsPerSecond(), config.maxInputsPerSecond(), seed);
         int sequence = 0;
@@ -27,7 +30,7 @@ final class RunSupport {
             for (int second = 0; second < schedule.size(); second++) {
                 long window = second / config.outputIntervalSeconds();
                 if (config.processingMode() == ProcessingMode.METADATA) {
-                    expectedWindows.computeIfAbsent(window, ignored -> new Workload.WindowAccumulator());
+                    expectedWindows.computeIfAbsent(window, ignored -> new Workload.ExpectedWindowAccumulator());
                 }
                 if (second % config.outputIntervalSeconds() == 0) previous = null;
                 int count = schedule.get(second);
@@ -47,7 +50,8 @@ final class RunSupport {
                         previous = event;
                     }
                     if (config.processingMode() == ProcessingMode.METADATA) {
-                        expectedWindows.computeIfAbsent(window, ignored -> new Workload.WindowAccumulator()).add(event);
+                        expectedWindows.computeIfAbsent(window, ignored -> new Workload.ExpectedWindowAccumulator())
+                                .add(event, duplicate);
                     }
                     long eventTime = second * 1_000L + (long) index * 1_000L / Math.max(1, count);
                     producer.send(new ProducerRecord<>(config.inputTopic(), null, eventTime,
@@ -59,6 +63,9 @@ final class RunSupport {
                 boolean windowComplete = (second + 1) % config.outputIntervalSeconds() == 0
                         || second + 1 == schedule.size();
                 if (config.processingMode() == ProcessingMode.METADATA && windowComplete) {
+                    Workload.ExpectedWindowAccumulator expected = expectedWindows.remove(window);
+                    expectedAggregates.put(Math.toIntExact(window), expected.output(runId, window,
+                            config.outputIntervalSeconds(), durationSeconds, 0).payload());
                     for (int partition = 0; partition < partitions; partition++) {
                         InputEvent marker = new InputEvent("marker-" + window + '-' + partition,
                                 runId, -1, window, "marker-" + partition, System.currentTimeMillis(), "");
@@ -71,13 +78,43 @@ final class RunSupport {
             }
             producer.flush();
             if (failure.get() != null) throw failure.get();
-            Map<Integer, String> expectedAggregates = new HashMap<>();
-            expectedWindows.forEach((window, aggregate) -> expectedAggregates.put(window.intValue(),
-                    aggregate.output(runId, window, config.outputIntervalSeconds(), durationSeconds, 0).payload()));
             int expectedOutputs = config.processingMode() == ProcessingMode.METADATA
                     ? expectedAggregates.size() : sequence;
             return new Generation(sequence, expectedOutputs, Map.copyOf(expectedAggregates));
         }
+    }
+
+    private static Generation generateVehicleCongestion(Config config, String runId,
+                                                         int durationSeconds) throws Exception {
+        AtomicReference<Exception> failure = new AtomicReference<>();
+        Map<Integer, String> expected = new HashMap<>();
+        Map<String, VehicleCongestionRule> rules = new HashMap<>();
+        int sent = 0;
+        long started = System.nanoTime();
+        long epochStarted = System.currentTimeMillis();
+        try (var producer = KafkaSupport.producer(config)) {
+            int frames = durationSeconds * config.framesPerSecond();
+            for (int frameIndex = 0; frameIndex < frames; frameIndex++) {
+                waitUntil(started + frameIndex * 1_000_000_000L / config.framesPerSecond());
+                long timestamp = epochStarted + frameIndex * 1_000L / config.framesPerSecond();
+                for (int job = 0; job < config.simulatedJobs(); job++) {
+                    FrameEvent frame = VehicleWorkload.frame(config, runId, job, frameIndex, timestamp);
+                    FindingPayload finding = rules.computeIfAbsent(frame.jobId(), ignored -> new VehicleCongestionRule(config))
+                            .process(frame);
+                    if (finding != null) {
+                        OutputEvent output = VehicleWorkload.finding(runId, finding, 0);
+                        expected.put(Math.toIntExact(output.sequenceNumber()), output.payload());
+                    }
+                    producer.send(new ProducerRecord<>(config.inputTopic(), frame.jobId(), EventCodec.write(frame)),
+                            (metadata, error) -> { if (error != null) failure.compareAndSet(null, error); });
+                    sent++;
+                }
+            }
+            waitUntil(started + durationSeconds * 1_000_000_000L);
+            producer.flush();
+            if (failure.get() != null) throw failure.get();
+        }
+        return new Generation(sent, expected.size(), Map.copyOf(expected));
     }
 
     private static void waitUntil(long targetNanos) throws InterruptedException {
@@ -104,7 +141,8 @@ final class RunSupport {
                 String.join(" ", runtime.getInputArguments()), gcCount, gcTime);
         return new BenchmarkResult(implementation, java.time.Instant.now().toString(), runId, iteration, generation.sent(),
                 config.durationSeconds(), config.outputIntervalSeconds(),
-                requestedPartitions, actualPartitions, config.payloadBytes(), serviceInstances,
+                requestedPartitions, actualPartitions,
+                config.processingMode() == ProcessingMode.VEHICLE_CONGESTION ? 0 : config.payloadBytes(), serviceInstances,
                 eventsConsumedPerService,
                 metrics.elapsedSeconds(metrics.firstIngestNanos, metrics.lastIngestNanos),
                 metrics.throughput(metrics.firstIngestNanos, metrics.lastIngestNanos, validation.consumed()),

@@ -26,6 +26,8 @@ final class EventCodec {
 
     static PartialAggregate readPartial(String value) { return read(value, PartialAggregate.class); }
     static ConsolidatedPayload readConsolidated(String value) { return read(value, ConsolidatedPayload.class); }
+    static FrameEvent readFrame(String value) { return read(value, FrameEvent.class); }
+    static FindingPayload readFinding(String value) { return read(value, FindingPayload.class); }
 
     private static <T> T read(String value, Class<T> type) {
         try {

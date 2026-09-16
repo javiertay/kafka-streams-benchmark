@@ -18,7 +18,10 @@ record Config(
         int minInputsPerSecond, int maxInputsPerSecond, int duplicatePercent, long workloadSeed,
         int iterations, int replicationFactor,
         int httpPort, Path resultsDir, int timeoutSeconds, String processingGuarantee,
-        ProcessingMode processingMode, List<String> workerUrls, Map<String, String> extraKafkaProperties) {
+        ProcessingMode processingMode, List<String> workerUrls, Map<String, String> extraKafkaProperties,
+        int framesPerSecond, int simulatedJobs, int minDetectionsPerFrame, int maxDetectionsPerFrame,
+        int minVehicleCount, double maxVehicleVelocityKmh, int congestionMinDurationSeconds,
+        int clearDurationSeconds, double metersPerPixel, List<Point> roiPolygon) {
 
     static Config from(Map<String, String> env) {
         String bootstrap = required(env, "KAFKA_BOOTSTRAP_SERVERS");
@@ -76,7 +79,22 @@ record Config(
                 env.getOrDefault("KAFKA_STREAMS_PROCESSING_GUARANTEE", "at_least_once"),
                 ProcessingMode.parse(env.getOrDefault("BENCHMARK_PROCESSING_MODE", "transform")),
                 Arrays.stream(env.getOrDefault("BENCHMARK_WORKER_URLS", "").split(","))
-                        .map(String::trim).filter(value -> !value.isEmpty()).toList(), extras);
+                        .map(String::trim).filter(value -> !value.isEmpty()).toList(), extras,
+                positiveInt(env, "BENCHMARK_FRAMES_PER_SECOND", 5),
+                positiveInt(env, "BENCHMARK_SIMULATED_JOBS", 12),
+                nonNegativeInt(env, "BENCHMARK_MIN_DETECTIONS_PER_FRAME", 5),
+                positiveInt(env, "BENCHMARK_MAX_DETECTIONS_PER_FRAME", 25),
+                positiveInt(env, "BENCHMARK_MIN_VEHICLE_COUNT", 10),
+                positiveDouble(env, "BENCHMARK_MAX_VEHICLE_VELOCITY_KMH", 5),
+                congestionDuration(env),
+                positiveInt(env, "BENCHMARK_CLEAR_DURATION_SECONDS", 10),
+                positiveDouble(env, "BENCHMARK_METERS_PER_PIXEL", 0.05),
+                roi(env.getOrDefault("BENCHMARK_ROI_POLYGON", "0,0;1920,0;1920,1080;0,1080")));
+        if (config.minDetectionsPerFrame() > config.maxDetectionsPerFrame())
+            throw new IllegalArgumentException("BENCHMARK_MIN_DETECTIONS_PER_FRAME must not exceed BENCHMARK_MAX_DETECTIONS_PER_FRAME");
+        if (config.processingMode() == ProcessingMode.VEHICLE_CONGESTION
+                && config.maxDetectionsPerFrame() < config.minVehicleCount())
+            throw new IllegalArgumentException("BENCHMARK_MAX_DETECTIONS_PER_FRAME must be at least BENCHMARK_MIN_VEHICLE_COUNT");
         if (usesSsl && !Files.isRegularFile(config.truststore())) {
             throw new IllegalArgumentException("KAFKA_TRUSTSTORE_LOCATION is not a readable file: " + config.truststore());
         }
@@ -116,6 +134,18 @@ record Config(
         safe.put("warmupDurationSeconds", warmupDurationSeconds);
         safe.put("replicationFactor", replicationFactor);
         safe.put("processingMode", processingMode.name().toLowerCase(Locale.ROOT));
+        if (processingMode == ProcessingMode.VEHICLE_CONGESTION) {
+            safe.put("framesPerSecond", framesPerSecond);
+            safe.put("simulatedJobs", simulatedJobs);
+            safe.put("minDetectionsPerFrame", minDetectionsPerFrame);
+            safe.put("maxDetectionsPerFrame", maxDetectionsPerFrame);
+            safe.put("minVehicleCount", minVehicleCount);
+            safe.put("maxVehicleVelocityKmh", maxVehicleVelocityKmh);
+            safe.put("minDurationSeconds", congestionMinDurationSeconds);
+            safe.put("clearDurationSeconds", clearDurationSeconds);
+            safe.put("metersPerPixel", metersPerPixel);
+            safe.put("roiPolygon", roiPolygon);
+        }
         return safe;
     }
 
@@ -161,16 +191,46 @@ record Config(
         return value;
     }
 
+    private static double positiveDouble(Map<String, String> env, String key, double fallback) {
+        double value = Double.parseDouble(env.getOrDefault(key, Double.toString(fallback)));
+        if (!Double.isFinite(value) || value <= 0) throw new IllegalArgumentException(key + " must be positive");
+        return value;
+    }
+
+    private static int congestionDuration(Map<String, String> env) {
+        String preset = env.getOrDefault("BENCHMARK_CONGESTION_PRESET", "normal_road_segment");
+        int fallback = switch (preset) {
+            case "signalized_junction" -> 120;
+            case "normal_road_segment" -> 0;
+            default -> throw new IllegalArgumentException("BENCHMARK_CONGESTION_PRESET must be signalized_junction or normal_road_segment");
+        };
+        return nonNegativeInt(env, "BENCHMARK_CONGESTION_MIN_DURATION_SECONDS", fallback);
+    }
+
+    private static List<Point> roi(String value) {
+        try {
+            List<Point> points = Arrays.stream(value.split(";")).map(pair -> {
+                String[] coordinates = pair.trim().split(",");
+                if (coordinates.length != 2) throw new IllegalArgumentException();
+                return new Point(Double.parseDouble(coordinates[0].trim()), Double.parseDouble(coordinates[1].trim()));
+            }).toList();
+            if (points.size() < 3) throw new IllegalArgumentException();
+            return points;
+        } catch (RuntimeException exception) {
+            throw new IllegalArgumentException("BENCHMARK_ROI_POLYGON must contain at least three x,y points separated by semicolons", exception);
+        }
+    }
+
 }
 
 enum ProcessingMode {
-    TRANSFORM, METADATA;
+    TRANSFORM, METADATA, VEHICLE_CONGESTION;
 
     static ProcessingMode parse(String value) {
         try {
             return valueOf(value.trim().toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException exception) {
-            throw new IllegalArgumentException("BENCHMARK_PROCESSING_MODE must be transform or metadata", exception);
+            throw new IllegalArgumentException("BENCHMARK_PROCESSING_MODE must be transform, metadata, or vehicle_congestion", exception);
         }
     }
 }

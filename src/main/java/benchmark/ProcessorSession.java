@@ -3,6 +3,7 @@ package benchmark;
 import java.util.List;
 
 interface ProcessorSession {
+    WorkerProgress progress();
     ProcessorReport stop() throws Exception;
 
     static ProcessorSession start(Config config, WorkerCommand command) throws Exception {
@@ -17,6 +18,14 @@ interface ProcessorSession {
 
 record WorkerCommand(String implementation, String runId, String groupId,
                      long estimatedEvents, int inputPartitions, int durationSeconds) {}
+
+record WorkerProgress(String runId, int consumed, int published) {
+    static WorkerProgress combine(String runId, List<WorkerProgress> progress) {
+        return new WorkerProgress(runId,
+                progress.stream().mapToInt(WorkerProgress::consumed).sum(),
+                progress.stream().mapToInt(WorkerProgress::published).sum());
+    }
+}
 
 record ProcessorReport(int consumed, int published, MetricsSnapshot metrics, ResourceUsage resources,
                        List<ResourceSample> resourceSamples, long gcCount, long gcTimeMs) {

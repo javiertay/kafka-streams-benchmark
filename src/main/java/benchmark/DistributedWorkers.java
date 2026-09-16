@@ -18,12 +18,14 @@ final class DistributedWorkers implements AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper().findAndRegisterModules();
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     private final List<String> urls;
+    private final String runId;
     private final Set<String> startedUrls = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final Duration requestTimeout;
     private boolean stopped;
 
-    private DistributedWorkers(List<String> urls, int timeoutSeconds) {
+    private DistributedWorkers(List<String> urls, int timeoutSeconds, String runId) {
         this.urls = urls;
+        this.runId = runId;
         requestTimeout = Duration.ofSeconds(timeoutSeconds + 5L);
     }
 
@@ -32,7 +34,7 @@ final class DistributedWorkers implements AutoCloseable {
             throw new IllegalArgumentException("Scenario needs " + count + " worker services but only "
                     + config.workerUrls().size() + " are configured");
         DistributedWorkers workers = new DistributedWorkers(
-                config.workerUrls().stream().limit(count).toList(), config.timeoutSeconds());
+                config.workerUrls().stream().limit(count).toList(), config.timeoutSeconds(), command.runId());
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             var starts = workers.urls.stream()
                     .map(url -> executor.submit(() -> { workers.startPeer(url, command); return null; }))
@@ -77,6 +79,35 @@ final class DistributedWorkers implements AutoCloseable {
             List<ProcessorReport> reports = new ArrayList<>(stops.size());
             for (var stop : stops) reports.add(stop.get());
             return reports;
+        } catch (ExecutionException exception) {
+            if (exception.getCause() instanceof Exception cause) throw cause;
+            throw exception;
+        }
+    }
+
+    WorkerProgress awaitConsumed(int expected, Duration timeout) throws Exception {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        WorkerProgress latest = progress();
+        while (latest.consumed() < expected && System.nanoTime() < deadline) {
+            Thread.sleep(100);
+            latest = progress();
+        }
+        return latest;
+    }
+
+    private WorkerProgress progress() throws Exception {
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var requests = urls.stream()
+                    .map(url -> executor.submit(() -> JSON.readValue(post(url + "/progress", ""), WorkerProgress.class)))
+                    .toList();
+            List<WorkerProgress> values = new ArrayList<>(requests.size());
+            for (var request : requests) {
+                WorkerProgress value = request.get();
+                if (!runId.equals(value.runId()))
+                    throw new IllegalStateException("Worker progress belongs to another run: " + value.runId());
+                values.add(value);
+            }
+            return WorkerProgress.combine(runId, values);
         } catch (ExecutionException exception) {
             if (exception.getCause() instanceof Exception cause) throw cause;
             throw exception;

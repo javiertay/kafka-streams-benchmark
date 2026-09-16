@@ -32,7 +32,7 @@ final class OutputCollector implements AutoCloseable {
         this.consumer = KafkaSupport.consumer(config, "benchmark-observer-" + runId);
         this.runId = runId;
         this.metrics = metrics;
-        this.validateAggregateValues = config.processingMode() == ProcessingMode.METADATA;
+        this.validateAggregateValues = config.processingMode() != ProcessingMode.TRANSFORM;
         this.seen = new BitSet();
         thread = Thread.ofPlatform().name("output-observer").start(() -> collect(config.outputTopic()));
         if (!ready.await(config.timeoutSeconds(), java.util.concurrent.TimeUnit.SECONDS)) {

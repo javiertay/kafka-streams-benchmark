@@ -7,14 +7,14 @@ benchmark-input → Kafka Streams                    → benchmark-output
 benchmark-input → KafkaConsumer + KafkaProducer    → benchmark-output
 ```
 
-The benchmark asks: for the same deterministic variable-rate input schedule, Java runtime, Kafka cluster, JSON data, partitions, resource limits, processing logic, acknowledgements, and at-least-once delivery, which implementation performs better and which uses less CPU and RAM? It exists to replace assumptions about framework overhead with measurements from the target Kafka environment.
+The benchmark asks: for the same deterministic workload, Java runtime, Kafka cluster, JSON data, partitions, resource limits, processing logic, acknowledgements, and at-least-once delivery, which implementation performs better and which uses less CPU and RAM? It exists to replace assumptions about framework overhead with measurements from the target Kafka environment.
 
 ## What it measures
 
 - **Ingestion elapsed time and throughput:** receiving the complete live input schedule from Kafka.
 - **Stage elapsed time and throughput:** ingestion, processing, and publishing wall times are shown directly. Per-record processing p50/p95/p99 is identically timed from JSON decoding through business logic and output handoff for both implementations.
 - **Publishing throughput and p50/p95/p99 latency:** time from processing completion until the output observer receives the record. This is publish-to-observe latency, not asynchronous API submission time. Kafka Streams does not expose per-record producer callbacks, so this definition is used for both implementations.
-- **Total elapsed time and input throughput:** processor worker launch until all expected outputs are observed. Throughput uses consumed inputs, not output count, so suppressed metadata output does not artificially lower processing capacity.
+- **Total elapsed time and input throughput:** input generation start until all scheduled inputs are consumed and all expected outputs are observed. Throughput uses consumed inputs, not output count, so suppressed output does not artificially lower processing capacity.
 - **Average/peak CPU and RAM:** time-aligned aggregate samples across processor service JVMs only; generator and observer resources are excluded. Peaks are simultaneous totals, not sums of independently occurring per-service peaks.
 - **Technical details:** Java/Kafka versions, GC, heap limit, JVM flags, GC activity, and safe client settings.
 
@@ -39,19 +39,19 @@ The build and runtime use Eclipse Temurin Java 25. Maven runs inside the multi-s
 
 The cluster defaults to three active brokers and replication factor three. Set `KAFKA_BROKER_COUNT` to `1`, `2`, or `3`; broker containers above that number remain idle, and the benchmark topic and Kafka internal-topic replication factors follow the active broker count. Minimum in-sync replicas is one for the single-broker baseline and two for the two- or three-broker environments. The coordinator waits until Kafka reports exactly the configured number before starting the matrix, so a partially formed cluster fails clearly instead of producing a misleading result.
 
-The local defaults run a load matrix with:
+The local defaults run the vehicle-congestion workload with:
 
-- a deterministic input rate that changes every second between 10 and 500 records/second;
-- a five-minute measured run and one consolidated metadata output every five seconds;
-- 20% seeded duplicate events;
-- the `metadata` processing mode, which deduplicates, aggregates, and suppresses intermediate output;
+- 12 independently keyed camera jobs at 5 frames/second for a 60-second measured run;
+- one complete JSON frame per job and frame tick, with a deterministic count varying from 5 to 25 detections;
+- car, bus, and truck detections, bottom-centre ROI positions, and velocity recalculation every five frames;
+- the editable `normal_road_segment` preset by default, with a 10-vehicle gate and 5 km/h slow threshold;
 - 1, 3, and 6 partitions;
-- 1, 3, and 6 processor service instances; and
+- 1 and 3 processor service instances; and
 - a 10-second warm-up followed by two measured iterations with alternating implementation order.
 
-Only service counts that can receive partitions are run. The default partition/service pairs are therefore `1/1`, `3/1`, `3/3`, `6/1`, `6/3`, and `6/6`, producing six configurations. For Kafka Streams, each active worker starts one Kafka Streams instance with one stream thread and all workers share the same `application.id`. For plain Java, each active worker owns one `KafkaConsumer` and producer and all consumers share the same group ID. Kafka distributes partitions across separate services rather than threads in one JVM.
+Only service counts that can receive partitions are run. The default partition/service pairs are therefore `1/1`, `3/1`, `3/3`, `6/1`, and `6/3`, producing five configurations. Add `6` to `BENCHMARK_SERVICE_INSTANCES` to include the sixth `6/6` configuration. For Kafka Streams, each active worker starts one Kafka Streams instance with one stream thread and all workers share the same `application.id`. For plain Java, each active worker owns one `KafkaConsumer` and producer and all consumers share the same group ID. Kafka distributes partitions across separate services rather than threads in one JVM.
 
-Before each paired iteration, the coordinator computes the complete per-second rate schedule from the fixed seed. After workers are ready, it streams that schedule in real time. Kafka Streams and Plain Java receive the same rate each second, the same deterministic event identities and payloads, and duplicates in the same positions. Metadata interval markers cause each partition to emit a partial consolidation; a second processing stage merges all partition partials into exactly one output payload per interval.
+Before each paired iteration, the coordinator computes the complete deterministic workload from the fixed seed. After workers are ready, it streams that workload in real time. Kafka Streams and Plain Java receive the same frame rate, detection counts, detection types, track IDs, and movements. In `metadata` mode, they instead receive the same variable rate and duplicate positions, and interval markers drive consolidation.
 
 Start the default three-broker environment:
 
@@ -152,8 +152,8 @@ The `/app/results` volume is optional. Omit `-v ./benchmark-results:/app/results
 | `BENCHMARK_PARTIAL_TOPIC` | `benchmark-metadata-partials` | Internal partition-local metadata consolidation topic |
 | `BENCHMARK_OUTPUT_TOPIC` | `benchmark-output` | Retained output topic |
 | `BENCHMARK_PARTITIONS` | `1,3,6,12` | Strictly ascending partition scenarios |
-| `BENCHMARK_PAYLOAD_BYTES` | `1024` | Random source bytes before Base64 JSON encoding |
-| `BENCHMARK_PROCESSING_MODE` | `transform` | `transform` for one input/one output, or `metadata` for periodic deduplication and consolidation; Compose defaults to `metadata` |
+| `BENCHMARK_PAYLOAD_BYTES` | `1024` | Random source bytes before Base64 JSON encoding in transform/metadata modes; Compose defaults to `700`; ignored by vehicle-congestion mode |
+| `BENCHMARK_PROCESSING_MODE` | `transform` | `transform`, `metadata`, or `vehicle_congestion`; Compose defaults to `vehicle_congestion` |
 | `BENCHMARK_UNIQUE_KEYS` | `1000` | Number of repeatable keys |
 | `BENCHMARK_SERVICE_INSTANCES` | `1` | Comma-separated processor service/container counts; values greater than a scenario's requested partitions are omitted |
 | `BENCHMARK_WORKER_URLS` | none | Comma-separated worker base URLs; at least the largest requested service count is required |
@@ -164,6 +164,17 @@ The `/app/results` volume is optional. Omit `-v ./benchmark-results:/app/results
 | `BENCHMARK_MAX_INPUTS_PER_SECOND` | `500` | Inclusive maximum input count selected for each second |
 | `BENCHMARK_DUPLICATE_PERCENT` | `20` | Approximate deterministic percentage of metadata inputs that repeat the preceding event identity |
 | `BENCHMARK_WORKLOAD_SEED` | `42` | Seed that makes the rate schedule, inputs, and duplicate positions repeatable |
+| `BENCHMARK_FRAMES_PER_SECOND` | `5` | Frame rate used by the vehicle-congestion workload |
+| `BENCHMARK_SIMULATED_JOBS` | `12` | Independently keyed camera jobs generated each frame |
+| `BENCHMARK_MIN_DETECTIONS_PER_FRAME` | `5` | Minimum deterministic detection count per frame |
+| `BENCHMARK_MAX_DETECTIONS_PER_FRAME` | `25` | Maximum deterministic detection count per frame |
+| `BENCHMARK_MIN_VEHICLE_COUNT` | `10` | Slow vehicles required for the congestion gate |
+| `BENCHMARK_MAX_VEHICLE_VELOCITY_KMH` | `5` | Strict upper speed threshold for a slow vehicle |
+| `BENCHMARK_CONGESTION_PRESET` | `normal_road_segment` | Sets minimum duration to `0`; `signalized_junction` sets it to `120` |
+| `BENCHMARK_CONGESTION_MIN_DURATION_SECONDS` | preset value | Optional editable override for the preset duration |
+| `BENCHMARK_CLEAR_DURATION_SECONDS` | `10` | Continuous gate-failure time required to end an alert episode |
+| `BENCHMARK_METERS_PER_PIXEL` | `0.05` | Scalar conversion used by five-frame velocity estimation |
+| `BENCHMARK_ROI_POLYGON` | full 1920x1080 frame | Semicolon-separated `x,y` polygon points; at least three required |
 | `BENCHMARK_WARMUP_DURATION_SECONDS` | `10` | Unreported warm-up duration per implementation and scenario; `0` disables it |
 | `BENCHMARK_ITERATIONS` | `4` | Measured iterations; Compose uses `2`; must be an even number of at least two so execution order is balanced; median is primary |
 | `BENCHMARK_REPLICATION_FACTOR` | `KAFKA_BROKER_COUNT` | Replication factor for newly created topics; cannot exceed the configured broker count |
@@ -192,11 +203,13 @@ The expected output count is `ceil(BENCHMARK_DURATION_SECONDS / BENCHMARK_OUTPUT
 
 Both implementations deliberately use bounded, in-memory, per-run interval state for this performance comparison. This compares equivalent business processing without charging only one side for durable state recovery. It is not a failover or recovery benchmark.
 
-Compose applies the selected mode to the coordinator and every worker. It defaults to metadata mode; set `BENCHMARK_PROCESSING_MODE=transform` in the shell before `docker compose up --build` to rerun the original baseline.
+`BENCHMARK_PROCESSING_MODE=vehicle_congestion` consumes one complete camera-frame JSON record at a time. For each job it filters to car/bus/truck detections whose bounding-box bottom centre is inside the ROI, estimates velocity every five frames using the configured metres-per-pixel scalar, recomputes the current slow-vehicle count, applies the continuous congestion and clear timers, and emits one `VEHICLE_CONGESTION_VEHICLE_SPEED_DETECTED` finding per episode. The number of input records is fixed at `duration x frames per second x simulated jobs`; the number of detections inside each frame varies deterministically between the configured bounds. `BENCHMARK_PAYLOAD_BYTES` is intentionally ignored in this mode and remains available to `transform` and `metadata`.
+
+Compose applies the selected mode to the coordinator and every worker. It defaults to vehicle-congestion mode; set `BENCHMARK_PROCESSING_MODE=metadata` or `transform` in the shell before `docker compose up --build` to run either earlier workload.
 
 ## How Kafka Streams consumes and publishes
 
-The complete implementation is in `KafkaStreamsProcessor`. Its `buildTopology` method selects the transform or metadata topology, `transformProcessor` contains the stateless path, and `metadataProcessor` contains task-local deduplication, aggregation, and final publication. Shared Kafka client settings remain in `KafkaSupport.streamsProperties`.
+The complete implementation is in `KafkaStreamsProcessor`. Its `buildTopology` method selects the transform, metadata, or vehicle-congestion topology. Shared Kafka client settings remain in `KafkaSupport.streamsProperties`.
 
 ### Client configuration
 
@@ -231,11 +244,11 @@ benchmark-input
   → publish one consolidated JSON payload to benchmark-output
 ```
 
-Every active worker reaches `RUNNING` before the live schedule begins. At each output boundary, partition markers release local partial payloads to the internal topic; its single partition provides one global merge order. The coordinator waits for the independent output observer to see every expected final output, then stops all workers and aggregates their counters, latency samples, CPU, RAM, and GC measurements.
+Every active worker reaches `RUNNING` before the live schedule begins. At each output boundary, partition markers release local partial payloads to the internal topic; its single partition provides one global merge order. After generation, the coordinator polls live counters across all active workers until every scheduled input is consumed and independently waits for every expected output. Only then does it stop the workers and aggregate their counters, latency samples, CPU, RAM, and GC measurements.
 
 ## How the conventional consumer and publisher are set up
 
-The complete implementation is in `TraditionalKafkaProcessor`. Its `consume` method is the input poll loop, `process` contains the selected transform or metadata logic, `publishPartial` releases partition interval payloads, and `consumePartials` performs the global merge. Shared client settings remain in `KafkaSupport.consumerProperties` and `KafkaSupport.producerProperties`.
+The complete implementation is in `TraditionalKafkaProcessor`. Its input poll loop dispatches records to equivalent transform, metadata, or vehicle-congestion logic. Shared client settings remain in `KafkaSupport.consumerProperties` and `KafkaSupport.producerProperties`.
 
 ### Consumer configuration
 
@@ -259,7 +272,7 @@ Each active service owns one `KafkaConsumer`, because a consumer is not thread-s
 | `enable.idempotence` | `true` | Makes retries safe from duplicate Kafka writes. |
 | SSL settings | same shared settings as Kafka Streams | Uses the same external cluster and truststore. |
 
-Each worker owns one `KafkaProducer`. Transform mode invokes `Workload.transform` and sends each result. In metadata mode the same consumer group subscribes to both input and partial topics: input assignments publish partition partials, while the worker assigned the partial topic merges them into one final payload. The callback increments `published` only when Kafka reports success. Every producer is flushed before the result is finalized.
+Each worker owns one `KafkaProducer`. Transform mode invokes `Workload.transform` and sends each result. In metadata mode the same consumer group subscribes to both input and partial topics: input assignments publish partition partials, while the worker assigned the partial topic merges them into one final payload. Vehicle-congestion mode keeps independent rule state per job and publishes only when an episode starts. The callback increments `published` only when Kafka reports success. Every producer is flushed before the result is finalized.
 
 ### Shared output observer
 
@@ -273,7 +286,7 @@ Kafka partition counts can increase but cannot decrease. Scenarios must therefor
 
 ## Fairness and result validity
 
-Both paths use Java 25, the same seeded per-second input schedule, image and service count, Jackson JSON, payloads, duplicate positions and processing mode, the same topics and partition count, `acks=all`, one-second offset commits, at-least-once transport settings, JVM flags, CPU/memory limits, and sequential execution. Warm-ups are excluded. Only the run ID and wall-clock timestamps differ. Measured execution order alternates by iteration, and the required even iteration count gives each implementation the first and second position equally often.
+Both paths use Java 25, the same seeded workload, image and service count, Jackson JSON, payloads and processing mode, the same topics and partition count, `acks=all`, one-second offset commits, at-least-once transport settings, JVM flags, CPU/memory limits, and sequential execution. Warm-ups are excluded. In vehicle-congestion mode, the paired paths receive identical frame and detection patterns. Only the run ID and wall-clock timestamps differ. Measured execution order alternates by iteration, and the required even iteration count gives each implementation the first and second position equally often.
 
 Metadata mode deliberately performs the same aggregate-state JSON decode and encode in both implementations. Kafka Streams stores those strings in task-local in-memory stores while plain Java stores them in maps, leaving only the state-container/framework implementation as the measured difference.
 

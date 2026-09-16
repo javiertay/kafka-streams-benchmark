@@ -21,12 +21,17 @@ final class BenchmarkOrchestrator {
                 .mapToInt(partitions -> (int) config.serviceInstances().stream()
                         .filter(services -> isMeaningfulScalingScenario(partitions, services)).count())
                 .sum();
-        System.out.printf("[benchmark] Starting matrix: %d scenario%s, 2 implementations, "
-                        + "%d measured iteration%s, %ds/run, %ds warm-up, %,d-%,d inputs/s%n",
-                totalScenarios, totalScenarios == 1 ? "" : "s",
-                config.iterations(), config.iterations() == 1 ? "" : "s",
-                config.durationSeconds(), config.warmupDurationSeconds(),
-                config.minInputsPerSecond(), config.maxInputsPerSecond());
+        if (config.processingMode() == ProcessingMode.VEHICLE_CONGESTION)
+            System.out.printf("[benchmark] Starting matrix: %d scenarios, 2 implementations, %d measured iterations, %ds/run, %ds warm-up, %d jobs at %d fps%n",
+                    totalScenarios, config.iterations(), config.durationSeconds(), config.warmupDurationSeconds(),
+                    config.simulatedJobs(), config.framesPerSecond());
+        else
+            System.out.printf("[benchmark] Starting matrix: %d scenario%s, 2 implementations, "
+                            + "%d measured iteration%s, %ds/run, %ds warm-up, %,d-%,d inputs/s%n",
+                    totalScenarios, totalScenarios == 1 ? "" : "s",
+                    config.iterations(), config.iterations() == 1 ? "" : "s",
+                    config.durationSeconds(), config.warmupDurationSeconds(),
+                    config.minInputsPerSecond(), config.maxInputsPerSecond());
         List<BenchmarkResult> results = new ArrayList<>();
         List<SkippedScenario> skipped = new ArrayList<>();
         int scenarioNumber = 0;
@@ -57,14 +62,18 @@ final class BenchmarkOrchestrator {
         long scenarioStarted = System.nanoTime();
         String scenario = "[scenario " + scenarioNumber + "/" + totalScenarios + "]";
         System.out.printf("%s Starting: %,d events, %d partition%s, %d service%s%n",
-                scenario, Workload.inputSchedule(config.durationSeconds(), config.minInputsPerSecond(),
+                scenario, config.processingMode() == ProcessingMode.VEHICLE_CONGESTION
+                        ? VehicleWorkload.eventCount(config, config.durationSeconds())
+                        : Workload.inputSchedule(config.durationSeconds(), config.minInputsPerSecond(),
                         config.maxInputsPerSecond(), config.workloadSeed()).stream().mapToInt(Integer::intValue).sum(), requestedPartitions,
                 requestedPartitions == 1 ? "" : "s", serviceInstances,
                 serviceInstances == 1 ? "" : "s");
         if (shouldSkip(requestedPartitions, actualPartitions)) {
             String reason = "The retained topics already have " + actualPartitions
                     + " partitions; Kafka partitions cannot be decreased.";
-            skipped.add(new SkippedScenario(Workload.inputSchedule(config.durationSeconds(), config.minInputsPerSecond(),
+            skipped.add(new SkippedScenario(config.processingMode() == ProcessingMode.VEHICLE_CONGESTION
+                            ? VehicleWorkload.eventCount(config, config.durationSeconds())
+                            : Workload.inputSchedule(config.durationSeconds(), config.minInputsPerSecond(),
                             config.maxInputsPerSecond(), config.workloadSeed()).stream().mapToInt(Integer::intValue).sum(),
                     requestedPartitions, actualPartitions,
                     serviceInstances, reason));

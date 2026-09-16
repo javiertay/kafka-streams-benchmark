@@ -130,6 +130,13 @@ class ConfigTest {
                 "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
                 "BENCHMARK_PROCESSING_MODE", "metadata"));
         assertEquals(ProcessingMode.METADATA, metadata.processingMode());
+        Config congestion = Config.from(Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
+                "BENCHMARK_PROCESSING_MODE", "vehicle_congestion"));
+        assertEquals(ProcessingMode.VEHICLE_CONGESTION, congestion.processingMode());
+        assertEquals(5, congestion.framesPerSecond());
+        assertEquals(0.05, congestion.metersPerPixel());
         assertThrows(IllegalArgumentException.class, () -> Config.from(Map.of(
                 "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
                 "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",

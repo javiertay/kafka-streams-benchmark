@@ -29,6 +29,20 @@ class WorkloadTest {
         assertTrue(first.stream().distinct().count() > 1);
     }
 
+    @Test void vehicleFramesAreDeterministicVaryDetectionCountsAndRoundTrip() {
+        Config config = Config.from(java.util.Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
+                "BENCHMARK_PROCESSING_MODE", "vehicle_congestion"));
+        FrameEvent frame = VehicleWorkload.frame(config, "run", 0, 7, 1400);
+        assertEquals(frame, VehicleWorkload.frame(config, "run", 0, 7, 1400));
+        assertEquals(frame, EventCodec.readFrame(EventCodec.write(frame)));
+        assertEquals(frame.metadata(), VehicleWorkload.frame(config, "another-run", 0, 7, 9000).metadata());
+        assertTrue(java.util.stream.LongStream.range(0, 20)
+                .map(i -> VehicleWorkload.frame(config, "run", 0, i, i * 200).metadata().size())
+                .distinct().count() > 1);
+    }
+
     @Test void consolidatedPayloadCountsDuplicatesAndMergesPartitionPartials() {
         InputEvent first = Workload.event("run", 0, 0, 2, 8, 10, 42, 100);
         InputEvent duplicate = new InputEvent(first.eventId(), "run", 1, 2,
@@ -70,5 +84,24 @@ class WorkloadTest {
         assertEquals(2, second.totalInputCount());
         assertEquals(1, second.uniqueEventCount());
         assertEquals(1, second.duplicateCount());
+    }
+
+    @Test void compactExpectedAccumulatorMatchesFullDeduplication() {
+        InputEvent first = Workload.event("run", 0, 0, 0, 8, 10, 42, 100);
+        InputEvent duplicate = new InputEvent(first.eventId(), "run", 1, 0,
+                first.key(), 101, first.payload());
+        InputEvent second = Workload.event("run", 2, 1, 0, 8, 10, 42, 102);
+        Workload.WindowAccumulator full = new Workload.WindowAccumulator();
+        Workload.ExpectedWindowAccumulator expected = new Workload.ExpectedWindowAccumulator();
+
+        full.add(first);
+        full.add(duplicate);
+        full.add(second);
+        expected.add(first, false);
+        expected.add(duplicate, true);
+        expected.add(second, false);
+
+        assertEquals(full.output("run", 0, 10, 60, 0).payload(),
+                expected.output("run", 0, 10, 60, 0).payload());
     }
 }

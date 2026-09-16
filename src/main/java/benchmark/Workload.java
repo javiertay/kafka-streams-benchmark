@@ -73,14 +73,39 @@ final class Workload {
 
         OutputEvent output(String runId, long window, int intervalSeconds,
                            int durationSeconds, long processedAt) {
-            ConsolidatedPayload payload = new ConsolidatedPayload(window,
-                    window * intervalSeconds * 1_000L,
-                    Math.min((window + 1) * intervalSeconds, durationSeconds) * 1_000L,
-                    List.copyOf(trackIds), total, total - duplicates, trackIds.size(), duplicates);
-            String json = EventCodec.write(payload);
-            return new OutputEvent("window-" + window, runId, window, "window-" + window,
-                    0, processedAt, json, json.hashCode());
+            return consolidatedOutput(runId, window, intervalSeconds, durationSeconds, processedAt,
+                    trackIds, total, duplicates);
         }
+    }
+
+    static final class ExpectedWindowAccumulator {
+        private final TreeSet<String> trackIds = new TreeSet<>();
+        private int total;
+        private int duplicates;
+
+        void add(InputEvent input, boolean duplicate) {
+            total++;
+            if (duplicate) duplicates++;
+            else trackIds.add(input.key());
+        }
+
+        OutputEvent output(String runId, long window, int intervalSeconds,
+                           int durationSeconds, long processedAt) {
+            return consolidatedOutput(runId, window, intervalSeconds, durationSeconds, processedAt,
+                    trackIds, total, duplicates);
+        }
+    }
+
+    private static OutputEvent consolidatedOutput(String runId, long window, int intervalSeconds,
+                                                  int durationSeconds, long processedAt,
+                                                  TreeSet<String> trackIds, int total, int duplicates) {
+        ConsolidatedPayload payload = new ConsolidatedPayload(window,
+                window * intervalSeconds * 1_000L,
+                Math.min((window + 1) * intervalSeconds, durationSeconds) * 1_000L,
+                List.copyOf(trackIds), total, total - duplicates, trackIds.size(), duplicates);
+        String json = EventCodec.write(payload);
+        return new OutputEvent("window-" + window, runId, window, "window-" + window,
+                0, processedAt, json, json.hashCode());
     }
 
     static final class PartitionedWindows {

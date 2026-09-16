@@ -27,13 +27,16 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
     private final KafkaProducer<String, String> producer;
     private final KafkaConsumer<String, String> consumer;
     private final Thread consumerThread;
+    private final String runId;
     private final Workload.PartitionedWindows windows = new Workload.PartitionedWindows();
     private final Map<Long, Workload.WindowAccumulator> globalWindows = new HashMap<>();
     private final Map<Long, Integer> receivedParts = new HashMap<>();
+    private final Map<String, VehicleCongestionRule> congestionRules = new HashMap<>();
 
     TraditionalKafkaProcessor(Config config, WorkerCommand command, StageMetrics metrics) throws Exception {
         this.config = config;
         this.metrics = metrics;
+        this.runId = command.runId();
         producer = KafkaSupport.producer(config);
         consumer = KafkaSupport.consumer(config, command.groupId());
         CountDownLatch ready = new CountDownLatch(1);
@@ -77,6 +80,10 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
 
     private void process(Config config, WorkerCommand command, ConsumerRecord<String, String> record) {
         long started = System.nanoTime();
+        if (config.processingMode() == ProcessingMode.VEHICLE_CONGESTION) {
+            processVehicle(command, record, started);
+            return;
+        }
         InputEvent input;
         try {
             input = EventCodec.readInput(record.value());
@@ -90,14 +97,28 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
         }
 
         metrics.ingested();
-        consumed.incrementAndGet();
         if (config.processingMode() == ProcessingMode.METADATA) {
             windows.add(record.partition(), input);
+            consumed.incrementAndGet();
             metrics.processed(System.nanoTime() - started);
             return;
         }
         OutputEvent output = Workload.transform(input, System.currentTimeMillis());
         publish(output);
+        consumed.incrementAndGet();
+        metrics.processed(System.nanoTime() - started);
+    }
+
+    private void processVehicle(WorkerCommand command, ConsumerRecord<String, String> record, long started) {
+        FrameEvent frame;
+        try { frame = EventCodec.readFrame(record.value()); }
+        catch (IllegalArgumentException ignored) { return; }
+        if (!frame.jobId().startsWith(command.runId() + ":job-")) return;
+        metrics.ingested();
+        FindingPayload finding = congestionRules.computeIfAbsent(frame.jobId(), ignored -> new VehicleCongestionRule(config))
+                .process(frame);
+        if (finding != null) publish(VehicleWorkload.finding(command.runId(), finding, System.currentTimeMillis()));
+        consumed.incrementAndGet();
         metrics.processed(System.nanoTime() - started);
     }
 
@@ -134,6 +155,10 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
                 (metadata, error) -> {
                     if (error == null) published.incrementAndGet();
                 });
+    }
+
+    @Override public WorkerProgress progress() {
+        return new WorkerProgress(runId, consumed.get(), published.get());
     }
 
     @Override public ProcessorReport stop() throws InterruptedException {

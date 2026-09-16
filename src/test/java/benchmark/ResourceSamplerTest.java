@@ -7,6 +7,16 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class ResourceSamplerTest {
+    @Test void combinesLiveWorkerProgressForDrainChecks() {
+        WorkerProgress combined = WorkerProgress.combine("run", List.of(
+                new WorkerProgress("run", 120, 2),
+                new WorkerProgress("run", 80, 3)));
+
+        assertEquals("run", combined.runId());
+        assertEquals(200, combined.consumed());
+        assertEquals(5, combined.published());
+    }
+
     @Test void aggregatesOnlySimultaneousWorkerSamplesForTruePeak() {
         MetricsSnapshot empty = new MetricsSnapshot(List.of(), List.of(), 0, 0, 0, 0);
         ProcessorReport first = new ProcessorReport(0, 0, empty, new ResourceUsage(50, 90, 100, 100),

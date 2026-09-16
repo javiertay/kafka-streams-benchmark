@@ -28,9 +28,11 @@ final class KafkaStreamsProcessor implements ProcessorSession {
     private final long initialGcCount = ResourceSampler.gcCount();
     private final long initialGcTime = ResourceSampler.gcTime();
     private final KafkaStreams streams;
+    private final String runId;
 
     KafkaStreamsProcessor(Config config, WorkerCommand command, StageMetrics metrics) throws Exception {
         this.metrics = metrics;
+        this.runId = command.runId();
         streams = new KafkaStreams(buildTopology(config, command),
                 KafkaSupport.streamsProperties(config, command.groupId(), command.runId(), 1));
         awaitRunning(config.timeoutSeconds());
@@ -44,6 +46,9 @@ final class KafkaStreamsProcessor implements ProcessorSession {
                     .to(config.partialTopic(), Produced.with(Serdes.String(), Serdes.String()));
             builder.stream(config.partialTopic(), Consumed.with(Serdes.String(), Serdes.String()))
                     .process(() -> metadataGlobalProcessor(config, command))
+                    .to(config.outputTopic(), Produced.with(Serdes.String(), Serdes.String()));
+        } else if (config.processingMode() == ProcessingMode.VEHICLE_CONGESTION) {
+            input.processValues(() -> vehicleProcessor(config, command))
                     .to(config.outputTopic(), Produced.with(Serdes.String(), Serdes.String()));
         } else {
             input.processValues(() -> transformProcessor(command))
@@ -66,9 +71,9 @@ final class KafkaStreamsProcessor implements ProcessorSession {
                 if (!command.runId().equals(input.runId())) return;
                 metrics.ingested();
                 OutputEvent output = Workload.transform(input, System.currentTimeMillis());
-                consumed.incrementAndGet();
                 context.forward(record.withValue(EventCodec.write(output)));
                 forwarded.incrementAndGet();
+                consumed.incrementAndGet();
                 metrics.processed(System.nanoTime() - started);
             }
         };
@@ -99,8 +104,35 @@ final class KafkaStreamsProcessor implements ProcessorSession {
                     return;
                 }
                 metrics.ingested();
-                consumed.incrementAndGet();
                 windows.computeIfAbsent(input.windowIndex(), ignored -> new Workload.WindowAccumulator()).add(input);
+                consumed.incrementAndGet();
+                metrics.processed(System.nanoTime() - started);
+            }
+        };
+    }
+
+    private FixedKeyProcessor<String, String, String> vehicleProcessor(Config config, WorkerCommand command) {
+        return new FixedKeyProcessor<>() {
+            private FixedKeyProcessorContext<String, String> context;
+            private final Map<String, VehicleCongestionRule> rules = new HashMap<>();
+
+            @Override public void init(FixedKeyProcessorContext<String, String> context) { this.context = context; }
+
+            @Override public void process(FixedKeyRecord<String, String> record) {
+                long started = System.nanoTime();
+                FrameEvent frame;
+                try { frame = EventCodec.readFrame(record.value()); }
+                catch (IllegalArgumentException ignored) { return; }
+                if (!frame.jobId().startsWith(command.runId() + ":job-")) return;
+                metrics.ingested();
+                FindingPayload finding = rules.computeIfAbsent(frame.jobId(), ignored -> new VehicleCongestionRule(config))
+                        .process(frame);
+                if (finding != null) {
+                    OutputEvent output = VehicleWorkload.finding(command.runId(), finding, System.currentTimeMillis());
+                    context.forward(record.withValue(EventCodec.write(output)));
+                    forwarded.incrementAndGet();
+                }
+                consumed.incrementAndGet();
                 metrics.processed(System.nanoTime() - started);
             }
         };
@@ -143,6 +175,10 @@ final class KafkaStreamsProcessor implements ProcessorSession {
         streams.start();
         if (!running.await(timeoutSeconds, TimeUnit.SECONDS))
             throw new IllegalStateException("Kafka Streams did not reach RUNNING state");
+    }
+
+    @Override public WorkerProgress progress() {
+        return new WorkerProgress(runId, consumed.get(), forwarded.get());
     }
 
     @Override public ProcessorReport stop() {

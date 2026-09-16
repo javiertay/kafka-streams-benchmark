@@ -20,6 +20,7 @@ final class WorkerServer {
         WorkerServer worker = new WorkerServer(config);
         HttpServer server = HttpServer.create(new InetSocketAddress(config.httpPort()), 0);
         server.createContext("/start", worker::start);
+        server.createContext("/progress", worker::progress);
         server.createContext("/stop", worker::stop);
         server.setExecutor(java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor());
         server.start();
@@ -58,6 +59,15 @@ final class WorkerServer {
             respond(exchange, 200, JSON.writeValueAsString(report));
         } catch (Exception exception) {
             System.err.println("[worker] STOP FAILED: " + exception.getMessage());
+            respond(exchange, 500, exception.getMessage());
+        }
+    }
+
+    private synchronized void progress(HttpExchange exchange) throws IOException {
+        try {
+            if (session == null) throw new IllegalStateException("Worker has no active scenario");
+            respond(exchange, 200, JSON.writeValueAsString(session.progress()));
+        } catch (Exception exception) {
             respond(exchange, 500, exception.getMessage());
         }
     }
