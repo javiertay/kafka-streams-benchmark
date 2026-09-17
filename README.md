@@ -41,9 +41,9 @@ The cluster defaults to three active brokers and replication factor three. Set `
 
 The local defaults run the vehicle-congestion workload with:
 
-- 12 independently keyed camera jobs at 5 frames/second for a 60-second measured run;
-- one complete JSON frame per job and frame tick, with a deterministic count varying from 5 to 25 detections;
-- car, bus, and truck detections, bottom-centre ROI positions, and velocity recalculation every five frames;
+- 1,000 independently keyed camera jobs at 5 frames/second for a 60-second measured run;
+- one complete JSON frame per job and frame tick, with a deterministic count varying from 25 to 100 detections;
+- car, bus, and truck detections, bottom-centre ROI positions, and velocity recalculation once per second;
 - the editable `normal_road_segment` preset by default, with a 10-vehicle gate and 5 km/h slow threshold;
 - 1, 3, and 6 partitions;
 - 1 and 3 processor service instances; and
@@ -173,7 +173,7 @@ The `/app/results` volume is optional. Omit `-v ./benchmark-results:/app/results
 | `BENCHMARK_CONGESTION_PRESET` | `normal_road_segment` | Sets minimum duration to `0`; `signalized_junction` sets it to `120` |
 | `BENCHMARK_CONGESTION_MIN_DURATION_SECONDS` | preset value | Optional editable override for the preset duration |
 | `BENCHMARK_CLEAR_DURATION_SECONDS` | `10` | Continuous gate-failure time required to end an alert episode |
-| `BENCHMARK_METERS_PER_PIXEL` | `0.05` | Scalar conversion used by five-frame velocity estimation |
+| `BENCHMARK_METERS_PER_PIXEL` | `0.05` | Camera-distance scalar used by one-second velocity estimation; independent of FPS |
 | `BENCHMARK_ROI_POLYGON` | full 1920x1080 frame | Semicolon-separated `x,y` polygon points; at least three required |
 | `BENCHMARK_WARMUP_DURATION_SECONDS` | `10` | Unreported warm-up duration per implementation and scenario; `0` disables it |
 | `BENCHMARK_ITERATIONS` | `4` | Measured iterations; Compose uses `2`; must be an even number of at least two so execution order is balanced; median is primary |
@@ -203,7 +203,7 @@ The expected output count is `ceil(BENCHMARK_DURATION_SECONDS / BENCHMARK_OUTPUT
 
 Both implementations deliberately use bounded, in-memory, per-run interval state for this performance comparison. This compares equivalent business processing without charging only one side for durable state recovery. It is not a failover or recovery benchmark.
 
-`BENCHMARK_PROCESSING_MODE=vehicle_congestion` consumes one complete camera-frame JSON record at a time. For each job it filters to car/bus/truck detections whose bounding-box bottom centre is inside the ROI, estimates velocity every five frames using the configured metres-per-pixel scalar, recomputes the current slow-vehicle count, applies the continuous congestion and clear timers, and emits one `VEHICLE_CONGESTION_VEHICLE_SPEED_DETECTED` finding per episode. The number of input records is fixed at `duration x frames per second x simulated jobs`; the number of detections inside each frame varies deterministically between the configured bounds. `BENCHMARK_PAYLOAD_BYTES` is intentionally ignored in this mode and remains available to `transform` and `metadata`.
+`BENCHMARK_PROCESSING_MODE=vehicle_congestion` consumes one complete camera-frame JSON record at a time. For each job it filters to car/bus/truck detections whose bounding-box bottom centre is inside the ROI, estimates velocity once per second using timestamps and the configured metres-per-pixel scalar, recomputes the current slow-vehicle count, applies the continuous congestion and clear timers, and emits one `VEHICLE_CONGESTION_VEHICLE_SPEED_DETECTED` finding per episode. Synthetic normal traffic moves at a constant pixels-per-second rate, so changing FPS changes message frequency without changing physical speed. The number of input records is fixed at `duration x frames per second x simulated jobs`; the number of detections inside each frame varies deterministically between the configured bounds. `BENCHMARK_PAYLOAD_BYTES` is intentionally ignored in this mode and remains available to `transform` and `metadata`.
 
 Compose applies the selected mode to the coordinator and every worker. It defaults to vehicle-congestion mode; set `BENCHMARK_PROCESSING_MODE=metadata` or `transform` in the shell before `docker compose up --build` to run either earlier workload.
 

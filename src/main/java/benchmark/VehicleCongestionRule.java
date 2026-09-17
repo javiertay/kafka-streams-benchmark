@@ -7,6 +7,7 @@ import java.util.Set;
 
 final class VehicleCongestionRule {
     static final String FINDING_TYPE = "VEHICLE_CONGESTION_VEHICLE_SPEED_DETECTED";
+    private static final long VELOCITY_SAMPLE_MILLIS = 1_000;
     private static final Set<String> VEHICLES = Set.of("car", "bus", "truck");
     private final Config config;
     private final Map<Long, TrackState> tracks = new HashMap<>();
@@ -30,7 +31,7 @@ final class VehicleCongestionRule {
             if (!inside(config.roiPolygon(), x, y)) continue;
             present.add(detection.trackId());
             TrackState track = tracks.computeIfAbsent(detection.trackId(), ignored -> new TrackState());
-            track.observe(frame.frameId(), frame.timestamp(), x, y, config.metersPerPixel());
+            track.observe(frame.timestamp(), x, y, config.metersPerPixel());
             if (track.velocityKmh != null && track.velocityKmh < config.maxVehicleVelocityKmh()) slowCount++;
         }
         tracks.keySet().removeIf(id -> !present.contains(id));
@@ -68,20 +69,19 @@ final class VehicleCongestionRule {
     }
 
     private static final class TrackState {
-        long measuredFrame = -1;
-        long measuredAt;
+        long measuredAt = -1;
         double x;
         double y;
         Double velocityKmh;
 
-        void observe(long frame, long timestamp, double nextX, double nextY, double metresPerPixel) {
-            if (measuredFrame < 0) {
-                measuredFrame = frame; measuredAt = timestamp; x = nextX; y = nextY; return;
+        void observe(long timestamp, double nextX, double nextY, double metresPerPixel) {
+            if (measuredAt < 0) {
+                measuredAt = timestamp; x = nextX; y = nextY; return;
             }
-            if (frame - measuredFrame >= 5) {
+            if (timestamp - measuredAt >= VELOCITY_SAMPLE_MILLIS) {
                 double seconds = (timestamp - measuredAt) / 1000.0;
                 if (seconds > 0) velocityKmh = Math.hypot(nextX - x, nextY - y) * metresPerPixel / seconds * 3.6;
-                measuredFrame = frame; measuredAt = timestamp; x = nextX; y = nextY;
+                measuredAt = timestamp; x = nextX; y = nextY;
             }
         }
     }

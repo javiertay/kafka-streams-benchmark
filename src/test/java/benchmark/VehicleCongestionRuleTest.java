@@ -33,6 +33,13 @@ class VehicleCongestionRuleTest {
         assertNotNull(rule.process(frame(10, 2000, vehicles(100, 100))));
     }
 
+    @Test void velocityIsMeasuredAfterOneSecondRegardlessOfFrameCount() {
+        VehicleCongestionRule rule = new VehicleCongestionRule(config(0, 1));
+        assertNull(rule.process(frame(0, 0, vehicles(100, 100))));
+        assertNull(rule.process(frame(5, 500, vehicles(100, 100))));
+        assertNotNull(rule.process(frame(10, 1000, vehicles(100, 100))));
+    }
+
     private static Config config(int minimumDuration, int clearDuration) {
         return Config.from(Map.ofEntries(
                 Map.entry("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"),

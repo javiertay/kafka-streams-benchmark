@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.SplittableRandom;
 
 final class VehicleWorkload {
+    private static final int NORMAL_PIXELS_PER_SECOND = 100;
+
     private VehicleWorkload() {}
 
     static int eventCount(Config config, int durationSeconds) {
@@ -27,7 +29,8 @@ final class VehicleWorkload {
             boolean vehicle = congested && index < config.minVehicleCount() || index % 5 != 4;
             String type = vehicle ? switch (index % 3) { case 0 -> "car"; case 1 -> "bus"; default -> "truck"; } : "cone";
             int baseX = 100 + Math.floorMod(index * 71 + job * 37, 1700);
-            int x = congested ? baseX : 50 + Math.floorMod(baseX + Math.toIntExact(frameId) * 20, 1800);
+            long movement = frameId * NORMAL_PIXELS_PER_SECOND / config.framesPerSecond();
+            int x = congested ? baseX : 50 + (int) Math.floorMod(baseX + movement, 1800L);
             int bottom = 150 + Math.floorMod(index * 43, 800);
             detections.add(new Detection(bottom, 0.5 + random.nextDouble() * 0.49, type,
                     x - 20, x + 20, bottom - 50, index));

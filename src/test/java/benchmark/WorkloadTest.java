@@ -43,6 +43,31 @@ class WorkloadTest {
                 .distinct().count() > 1);
     }
 
+    @Test void vehicleMovementPerSecondDoesNotChangeWithFrameRate() {
+        Config fiveFps = vehicleConfig(5);
+        Config tenFps = vehicleConfig(10);
+
+        int fiveFpsMovement = centreX(VehicleWorkload.frame(fiveFps, "run", 0, 5, 1000).metadata().getFirst())
+                - centreX(VehicleWorkload.frame(fiveFps, "run", 0, 0, 0).metadata().getFirst());
+        int tenFpsMovement = centreX(VehicleWorkload.frame(tenFps, "run", 0, 10, 1000).metadata().getFirst())
+                - centreX(VehicleWorkload.frame(tenFps, "run", 0, 0, 0).metadata().getFirst());
+
+        assertEquals(100, fiveFpsMovement);
+        assertEquals(fiveFpsMovement, tenFpsMovement);
+    }
+
+    private static Config vehicleConfig(int framesPerSecond) {
+        return Config.from(java.util.Map.of(
+                "KAFKA_BOOTSTRAP_SERVERS", "kafka:9092",
+                "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT",
+                "BENCHMARK_PROCESSING_MODE", "vehicle_congestion",
+                "BENCHMARK_FRAMES_PER_SECOND", Integer.toString(framesPerSecond)));
+    }
+
+    private static int centreX(Detection detection) {
+        return (detection.left() + detection.right()) / 2;
+    }
+
     @Test void consolidatedPayloadCountsDuplicatesAndMergesPartitionPartials() {
         InputEvent first = Workload.event("run", 0, 0, 2, 8, 10, 42, 100);
         InputEvent duplicate = new InputEvent(first.eventId(), "run", 1, 2,

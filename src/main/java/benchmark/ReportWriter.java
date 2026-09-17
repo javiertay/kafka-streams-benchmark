@@ -247,7 +247,7 @@ final class ReportWriter {
     private static String workloadDescription(String mode) {
         return switch (mode) {
             case "metadata" -> "Seeded variable-rate input, duplicate-event removal, and one globally consolidated track-ID payload per configured interval.";
-            case "vehicle_congestion" -> "Deterministic camera frames with varying detection counts, five-frame velocity estimation, ROI filtering, congestion timers, and one finding per episode.";
+            case "vehicle_congestion" -> "Deterministic camera frames with varying detection counts, one-second velocity estimation, ROI filtering, congestion timers, and one finding per episode.";
             default -> "One input event is transformed into one output event.";
         };
     }
