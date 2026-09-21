@@ -114,6 +114,8 @@ final class KafkaStreamsProcessor implements ProcessorSession {
     private FixedKeyProcessor<String, String, String> vehicleProcessor(Config config, WorkerCommand command) {
         return new FixedKeyProcessor<>() {
             private FixedKeyProcessorContext<String, String> context;
+            // Input is keyed by jobId, so partition ordering keeps each job's frames in sequence.
+            // The business-rule implementation itself is shared with the plain Java processor.
             private final Map<String, VehicleCongestionRule> rules = new HashMap<>();
 
             @Override public void init(FixedKeyProcessorContext<String, String> context) { this.context = context; }
@@ -125,9 +127,11 @@ final class KafkaStreamsProcessor implements ProcessorSession {
                 catch (IllegalArgumentException ignored) { return; }
                 if (!frame.jobId().startsWith(command.runId() + ":job-")) return;
                 metrics.ingested();
+                // One independent state machine per simulated camera-processing job.
                 FindingPayload finding = rules.computeIfAbsent(frame.jobId(), ignored -> new VehicleCongestionRule(config))
                         .process(frame);
                 if (finding != null) {
+                    // Intermediate frames are suppressed; only the episode-start finding is forwarded.
                     OutputEvent output = VehicleWorkload.finding(command.runId(), finding, System.currentTimeMillis());
                     context.forward(record.withValue(EventCodec.write(output)));
                     forwarded.incrementAndGet();

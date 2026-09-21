@@ -99,6 +99,7 @@ final class RunSupport {
                 long timestamp = epochStarted + frameIndex * 1_000L / config.framesPerSecond();
                 for (int job = 0; job < config.simulatedJobs(); job++) {
                     FrameEvent frame = VehicleWorkload.frame(config, runId, job, frameIndex, timestamp);
+                    // Replay the generated frame through the shared rule to build the exact expected findings.
                     FindingPayload finding = rules.computeIfAbsent(frame.jobId(), ignored -> new VehicleCongestionRule(config))
                             .process(frame);
                     if (finding != null) {

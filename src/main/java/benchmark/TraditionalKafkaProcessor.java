@@ -31,6 +31,7 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
     private final Workload.PartitionedWindows windows = new Workload.PartitionedWindows();
     private final Map<Long, Workload.WindowAccumulator> globalWindows = new HashMap<>();
     private final Map<Long, Integer> receivedParts = new HashMap<>();
+    // Same per-job business-rule type used by KafkaStreamsProcessor; only Kafka plumbing differs.
     private final Map<String, VehicleCongestionRule> congestionRules = new HashMap<>();
 
     TraditionalKafkaProcessor(Config config, WorkerCommand command, StageMetrics metrics) throws Exception {
@@ -115,8 +116,10 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
         catch (IllegalArgumentException ignored) { return; }
         if (!frame.jobId().startsWith(command.runId() + ":job-")) return;
         metrics.ingested();
+        // Kafka keeps each jobId key ordered within its assigned partition.
         FindingPayload finding = congestionRules.computeIfAbsent(frame.jobId(), ignored -> new VehicleCongestionRule(config))
                 .process(frame);
+        // As with Kafka Streams, publish only when the shared rule starts a new episode.
         if (finding != null) publish(VehicleWorkload.finding(command.runId(), finding, System.currentTimeMillis()));
         consumed.incrementAndGet();
         metrics.processed(System.nanoTime() - started);
