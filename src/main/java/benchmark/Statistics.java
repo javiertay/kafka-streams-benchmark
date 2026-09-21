@@ -55,19 +55,27 @@ final class StageMetrics {
     private final long sampleEvery;
     private final AtomicLong processingSeen = new AtomicLong();
     private final AtomicLong publishingSeen = new AtomicLong();
+    private final AtomicLong processingCount = new AtomicLong();
+    private final AtomicLong processingNanos = new AtomicLong();
 
     StageMetrics(long estimatedEvents) {
         sampleEvery = Math.max(1, (estimatedEvents + MAX_SAMPLES_PER_STAGE - 1) / MAX_SAMPLES_PER_STAGE);
     }
 
     void ingested() { mark(firstIngestNanos, lastIngestNanos); }
-    void processed(long latency) { sample(processing, processingSeen, latency); mark(firstProcessNanos, lastProcessNanos); }
+    void processed(long latency) {
+        processingCount.incrementAndGet();
+        processingNanos.addAndGet(latency);
+        sample(processing, processingSeen, latency);
+        mark(firstProcessNanos, lastProcessNanos);
+    }
     void flushed(long latency) { flushing.add(latency); }
     void published(long latency) { sample(publishing, publishingSeen, latency); markMonotonic(firstPublishNanos, lastPublishNanos); }
 
     MetricsSnapshot snapshot() {
         return new MetricsSnapshot(List.copyOf(processing), List.copyOf(flushing),
-                firstIngestNanos.get(), lastIngestNanos.get(), firstProcessNanos.get(), lastProcessNanos.get());
+                firstIngestNanos.get(), lastIngestNanos.get(), firstProcessNanos.get(), lastProcessNanos.get(),
+                processingCount.get(), processingNanos.get());
     }
 
     void merge(MetricsSnapshot snapshot) {
@@ -75,6 +83,8 @@ final class StageMetrics {
         flushing.addAll(snapshot.flushing());
         mergeRange(firstIngestNanos, lastIngestNanos, snapshot.firstIngest(), snapshot.lastIngest());
         mergeRange(firstProcessNanos, lastProcessNanos, snapshot.firstProcess(), snapshot.lastProcess());
+        processingCount.addAndGet(snapshot.processingCount());
+        processingNanos.addAndGet(snapshot.processingNanos());
     }
 
     double throughput(AtomicLong first, AtomicLong last, int count) {
@@ -109,4 +119,5 @@ final class StageMetrics {
 }
 
 record MetricsSnapshot(List<Long> processing, List<Long> flushing,
-                       long firstIngest, long lastIngest, long firstProcess, long lastProcess) {}
+                       long firstIngest, long lastIngest, long firstProcess, long lastProcess,
+                       long processingCount, long processingNanos) {}

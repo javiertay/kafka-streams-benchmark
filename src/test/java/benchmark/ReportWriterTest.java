@@ -86,10 +86,10 @@ class ReportWriterTest {
     private static BenchmarkResult result(String implementation, int eventCount, int services,
                                           double totalThroughput, boolean valid) {
         Latency latency = new Latency(1, 2, 3, 4);
-        return new BenchmarkResult(implementation, "2026-01-01T00:00:00Z",
-                implementation + eventCount + services, 1, eventCount, 300, 5, 3, 3, 256, services,
+        return new BenchmarkResult(implementation, BenchmarkType.END_TO_END, "2026-01-01T00:00:00Z",
+                implementation + eventCount + services, 1, eventCount, eventCount * 256L, 300, 5, 3, 3, 256, services,
                 java.util.Collections.nCopies(services, eventCount / services),
-                1, 10, 1, 10, latency, latency, 1, 10, latency,
+                1, 10, 1, 10, latency, 1, 10, 1, latency, 1, 10, latency,
                 10, totalThroughput, new ResourceUsage(1, 2, 3, 4),
                 new Validation(eventCount, eventCount, eventCount, eventCount, valid ? eventCount : eventCount - 1,
                         valid ? 0 : 1, 0, 0, 0),

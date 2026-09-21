@@ -61,11 +61,13 @@ final class ReportWriter {
                 <p class="muted">Green marks the better displayed value. Values that round to the same display precision are ties. Invalid runs never receive a winner.</p></header>
                 <section class="card"><h2>Overall summary</h2><p class="verdict"><strong>""" + escape(overallSummary(results)) + """
                 </strong></p><p class="muted">Each complete, valid configuration gets one vote based on median total processing throughput. Workloads are not averaged together.</p></section>
-                <section class="card"><h2>How to read the results</h2><p><strong>Scheduled input records:</strong> the deterministic total sent to each implementation; in vehicle-congestion mode each record is one complete frame whose detection count varies. <strong>Expected outputs:</strong> one per input in transform mode, one consolidated payload per interval in metadata mode, or one finding per congestion episode in vehicle-congestion mode. <strong>Total elapsed time:</strong> input streaming start until all scheduled inputs are consumed and all expected outputs are observed. <strong>CPU/RAM:</strong> totals across processor services only; generator and observer are excluded.</p></section>
-                """ + (tabs.isEmpty() ? "" : "<nav class=\"config-tabs\" role=\"tablist\" aria-label=\"Benchmark configurations\">" + tabs + "</nav>")
+                <section class="card"><h2>How to read the results</h2><p><strong>Scheduled input records:</strong> the deterministic total replayed by each implementation; in vehicle-congestion mode each record is one complete frame whose detection count varies. <strong>Expected outputs:</strong> one per input in transform mode, one consolidated payload per interval in metadata mode, or one finding per congestion episode in vehicle-congestion mode. <strong>Total elapsed time:</strong> worker release until all scheduled inputs are consumed and all expected outputs are observed. <strong>CPU/RAM:</strong> totals across processor services only; preparation, generator, and observer resources are excluded.</p></section>
+                """ + ingestionSection(results) + processingSection(results)
+                + (tabs.isEmpty() ? "" : "<section class=\"card\"><h2>End-to-end benchmark</h2><p class=\"muted\">The original complete-pipeline comparison remains below: consume, decode, apply the business rule, publish, and validate every expected output.</p></section>")
+                + (tabs.isEmpty() ? "" : "<nav class=\"config-tabs\" role=\"tablist\" aria-label=\"Benchmark configurations\">" + tabs + "</nav>")
                 + scenarios + (skipHtml.isEmpty() ? "" : "<section class=\"card\"><h2>Skipped scenarios</h2><ul>" + skipHtml + "</ul></section>") + """
                 <section class="card"><h2>Advanced JVM metrics</h2><p>Runtime, GC, heap, and safe Kafka configuration are available in <a href="summary.json">summary.json</a> and the per-run raw JSON files. Credentials are never written.</p>
-                <details><summary>Measurement notes and limitations</summary><p>Both implementations replay the same seeded rate schedule. Processing is timed identically from JSON decoding through business logic and output handoff. Kafka Streams does not expose a per-record producer acknowledgement callback, so publishing latency is measured from business-logic completion until the output observer receives the record. Latency percentiles use at most 100,000 evenly spaced samples per stage. Historical records are filtered by unique run ID.</p></details></section>
+                <details><summary>Measurement notes and limitations</summary><p>Both implementations replay the same pre-produced records from captured Kafka offsets; dataset preparation is not measured. Processing is timed identically from JSON decoding through business logic and output handoff. Kafka Streams does not expose a per-record producer acknowledgement callback, so publishing latency is measured from business-logic completion until the output observer receives the record. Latency percentiles use at most 100,000 evenly spaced samples per stage. Historical records are filtered by workload and execution IDs.</p></details></section>
                 </main><script>function showScenario(n){document.querySelectorAll('.scenario-panel').forEach((p,i)=>p.hidden=i!==n);document.querySelectorAll('.config-tab').forEach((b,i)=>b.setAttribute('aria-selected',i===n))}</script></body></html>
                 """;
     }
@@ -91,6 +93,7 @@ final class ReportWriter {
         rows.append(metricRow("Processing p50", streams.processingLatency().p50Ms(), plain.processingLatency().p50Ms(), false, " ms", valid));
         rows.append(metricRow("Processing p95", streams.processingLatency().p95Ms(), plain.processingLatency().p95Ms(), false, " ms", valid));
         rows.append(metricRow("Processing p99", streams.processingLatency().p99Ms(), plain.processingLatency().p99Ms(), false, " ms", valid));
+        rows.append(metricRow("Processing max", streams.processingLatency().maxMs(), plain.processingLatency().maxMs(), false, " ms", valid));
         rows.append(metricRow("Publishing elapsed time", streams.publishingElapsedSeconds(), plain.publishingElapsedSeconds(), false, " s", valid));
         rows.append(metricRow("Publishing throughput", streams.publishingThroughput(), plain.publishingThroughput(), true, "/s", valid));
         rows.append(metricRow("Publishing p99", streams.publishingLatency().p99Ms(), plain.publishingLatency().p99Ms(), false, " ms", valid));
@@ -175,6 +178,58 @@ final class ReportWriter {
                 metricLabel(label), leftClass, left, suffix, rightClass, right, suffix);
     }
 
+    private String ingestionSection(List<BenchmarkResult> all) {
+        StringBuilder body = new StringBuilder();
+        for (Scenario scenario : scenarios(all)) {
+            List<BenchmarkResult> streamsRuns = matching(all, scenario, "Kafka Streams", BenchmarkType.INGESTION_ONLY);
+            List<BenchmarkResult> plainRuns = matching(all, scenario, "Plain Java", BenchmarkType.INGESTION_ONLY);
+            if (streamsRuns.isEmpty() || plainRuns.isEmpty()) continue;
+            BenchmarkResult streams = Statistics.medianBy(streamsRuns, BenchmarkResult::totalThroughput);
+            BenchmarkResult plain = Statistics.medianBy(plainRuns, BenchmarkResult::totalThroughput);
+            boolean valid = streamsRuns.stream().allMatch(r -> r.validation().valid())
+                    && plainRuns.stream().allMatch(r -> r.validation().valid());
+            body.append("<h3>").append(number(scenario.eventCount())).append(" events Â· ")
+                    .append(scenario.actual()).append(" partitions Â· ").append(services(scenario.serviceInstances()))
+                    .append("</h3><p><strong>Consumed per service:</strong> Kafka Streams ")
+                    .append(distribution(streams.eventsConsumedPerService())).append("; Plain Java ")
+                    .append(distribution(plain.eventsConsumedPerService())).append("</p><table><thead><tr><th>Metric</th><th>Kafka Streams</th><th>Plain Java</th></tr></thead><tbody>")
+                    .append(metricRow("Pure ingestion elapsed time", streams.totalElapsedSeconds(), plain.totalElapsedSeconds(), false, " s", valid))
+                    .append(metricRow("Pure ingestion throughput", streams.totalThroughput(), plain.totalThroughput(), true, "/s", valid))
+                    .append(metricRow("Pure ingestion bandwidth", megabytesPerSecond(streams), megabytesPerSecond(plain), true, " MB/s", valid))
+                    .append(metricRow("Average CPU", streams.resources().averageCpuPercent(), plain.resources().averageCpuPercent(), false, "%", valid))
+                    .append(metricRow("Peak RAM", streams.resources().peakRamMb(), plain.resources().peakRamMb(), false, " MB", valid))
+                    .append("</tbody></table>");
+        }
+        if (body.isEmpty()) return "";
+        return "<section class=\"card\"><h2>Pure ingestion</h2><p class=\"muted\">Consumes the pre-produced Kafka backlog and counts matching records only. It performs no JSON decoding, business rule, or output publication, so this is the framework ingestion ceiling.</p>" + body + "</section>";
+    }
+
+    private String processingSection(List<BenchmarkResult> all) {
+        StringBuilder body = new StringBuilder();
+        for (Scenario scenario : scenarios(all)) {
+            List<BenchmarkResult> streamsRuns = matching(all, scenario, "Kafka Streams", BenchmarkType.END_TO_END);
+            List<BenchmarkResult> plainRuns = matching(all, scenario, "Plain Java", BenchmarkType.END_TO_END);
+            if (streamsRuns.isEmpty() || plainRuns.isEmpty()) continue;
+            BenchmarkResult streams = Statistics.medianBy(streamsRuns, BenchmarkResult::activeProcessingThroughput);
+            BenchmarkResult plain = Statistics.medianBy(plainRuns, BenchmarkResult::activeProcessingThroughput);
+            boolean valid = streamsRuns.stream().allMatch(r -> r.validation().valid())
+                    && plainRuns.stream().allMatch(r -> r.validation().valid());
+            body.append("<h3>").append(number(scenario.eventCount())).append(" events Â· ")
+                    .append(scenario.actual()).append(" partitions Â· ").append(services(scenario.serviceInstances()))
+                    .append("</h3><table><thead><tr><th>Metric</th><th>Kafka Streams</th><th>Plain Java</th></tr></thead><tbody>")
+                    .append(metricRow("Active processing time", streams.activeProcessingSeconds(), plain.activeProcessingSeconds(), false, " s", valid))
+                    .append(metricRow("Active processing throughput", streams.activeProcessingThroughput(), plain.activeProcessingThroughput(), true, "/s", valid))
+                    .append(metricRow("Processing mean", streams.meanProcessingLatencyMs(), plain.meanProcessingLatencyMs(), false, " ms", valid))
+                    .append(metricRow("Processing p50", streams.processingLatency().p50Ms(), plain.processingLatency().p50Ms(), false, " ms", valid))
+                    .append(metricRow("Processing p95", streams.processingLatency().p95Ms(), plain.processingLatency().p95Ms(), false, " ms", valid))
+                    .append(metricRow("Processing p99", streams.processingLatency().p99Ms(), plain.processingLatency().p99Ms(), false, " ms", valid))
+                    .append(metricRow("Processing max", streams.processingLatency().maxMs(), plain.processingLatency().maxMs(), false, " ms", valid))
+                    .append("</tbody></table>");
+        }
+        if (body.isEmpty()) return "";
+        return "<section class=\"card\"><h2>Pure processing</h2><p class=\"muted\">Uses the existing per-record timer around JSON decoding, the real business rule, and output creation/handoff. Kafka poll gaps and producer pacing are excluded; with multiple services, capacity uses the busiest worker's accumulated processing time.</p>" + body + "</section>";
+    }
+
     private static String neutralRow(String label, double left, double right, String suffix) {
         return String.format(Locale.ROOT, "<tr><td>%s</td><td>%,.2f%s</td><td>%,.2f%s</td></tr>",
                 metricLabel(label), left, suffix, right, suffix);
@@ -193,10 +248,17 @@ final class ReportWriter {
             case "Processing p50" -> "Median per-input time from before JSON decoding through the selected business logic and output handoff.";
             case "Processing p95" -> "95th-percentile per-input time from before JSON decoding through the selected business logic and output handoff.";
             case "Processing p99" -> "99th-percentile per-input time from before JSON decoding through the selected business logic and output handoff.";
+            case "Processing max" -> "Slowest sampled per-input time from before JSON decoding through the selected business logic and output handoff.";
+            case "Processing mean" -> "Exact accumulated processing time divided by the exact number of processed inputs; sampling is not used.";
+            case "Active processing time" -> "Largest accumulated per-record processing time among the worker services, representing parallel busy time without Kafka poll gaps.";
+            case "Active processing throughput" -> "All consumed inputs divided by the busiest worker's accumulated processing time; measures processing capacity while excluding input pacing and Kafka poll gaps.";
+            case "Pure ingestion elapsed time" -> "Time from simultaneously releasing the stable consumers until every pre-produced input record is consumed; startup and dataset production are excluded.";
+            case "Pure ingestion throughput" -> "All pre-produced input records divided by pure-ingestion elapsed time; JSON decoding, business logic, and output publication are disabled.";
+            case "Pure ingestion bandwidth" -> "Exact serialized Kafka key and value bytes consumed, divided by pure-ingestion elapsed time. Kafka protocol overhead is excluded.";
             case "Publishing elapsed time" -> "Wall-clock span from the first expected output observed on Kafka to the last expected output observed.";
             case "Publishing throughput" -> "Observed output records divided by publishing elapsed time.";
             case "Publishing p99" -> "99th-percentile time from final output payload creation until the observer consumes it from Kafka.";
-            case "Total elapsed time" -> "Time from starting input generation until every scheduled input is consumed and every expected output is observed; worker startup and shutdown are excluded.";
+            case "Total elapsed time" -> "Time from releasing the stable workers onto the pre-produced backlog until every scheduled input is consumed and every expected output is observed; preparation, startup, and shutdown are excluded.";
             case "Total processing throughput" -> "Consumed input records divided by total elapsed time, including input pacing, consolidation, publication, and final output drain.";
             case "Average CPU" -> "Time-aligned average CPU usage summed across processor service JVMs; generator and observer are excluded.";
             case "Peak CPU" -> "Highest time-aligned total CPU usage across processor service JVMs; generator and observer are excluded.";
@@ -212,7 +274,8 @@ final class ReportWriter {
 
     private static long rounded(double value) { return Math.round(value * 100); }
     private static List<Scenario> scenarios(List<BenchmarkResult> results) {
-        return results.stream().map(result -> new Scenario(result.eventCount(), result.durationSeconds(),
+        return results.stream().filter(result -> result.benchmarkType() == BenchmarkType.END_TO_END)
+                .map(result -> new Scenario(result.eventCount(), result.durationSeconds(),
                         result.outputIntervalSeconds(),
                         result.requestedPartitions(), result.actualPartitions(), result.serviceInstances()))
                 .distinct().sorted(Comparator.comparingInt(Scenario::partitions)
@@ -220,15 +283,24 @@ final class ReportWriter {
                         .thenComparingInt(Scenario::eventCount)).toList();
     }
     private static List<BenchmarkResult> matching(List<BenchmarkResult> all, Scenario scenario, String implementation) {
+        return matching(all, scenario, implementation, BenchmarkType.END_TO_END);
+    }
+    private static List<BenchmarkResult> matching(List<BenchmarkResult> all, Scenario scenario, String implementation,
+                                                   BenchmarkType benchmarkType) {
         return all.stream().filter(r -> r.eventCount() == scenario.eventCount()
                 && r.durationSeconds() == scenario.durationSeconds()
                 && r.outputIntervalSeconds() == scenario.outputIntervalSeconds()
                 && r.requestedPartitions() == scenario.partitions()
                 && r.serviceInstances() == scenario.serviceInstances()
+                && r.benchmarkType() == benchmarkType
                 && r.implementation().equals(implementation)).toList();
     }
     private static double min(List<BenchmarkResult> values) { return values.stream().mapToDouble(BenchmarkResult::totalThroughput).min().orElse(0); }
     private static double max(List<BenchmarkResult> values) { return values.stream().mapToDouble(BenchmarkResult::totalThroughput).max().orElse(0); }
+    private static double megabytesPerSecond(BenchmarkResult result) {
+        return result.totalElapsedSeconds() == 0 ? 0
+                : result.inputBytes() / 1_048_576.0 / result.totalElapsedSeconds();
+    }
     private static String number(long number) { return String.format(Locale.ROOT, "%,d", number); }
     private static String services(int count) { return count + (count == 1 ? " service" : " services"); }
     private static String environmentSummary(List<BenchmarkResult> results) {

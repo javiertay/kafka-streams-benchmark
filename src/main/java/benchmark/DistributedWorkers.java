@@ -85,6 +85,18 @@ final class DistributedWorkers implements AutoCloseable {
         }
     }
 
+    void resume() throws Exception {
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var requests = urls.stream()
+                    .map(url -> executor.submit(() -> { post(url + "/resume", ""); return null; }))
+                    .toList();
+            for (var request : requests) request.get();
+        } catch (ExecutionException exception) {
+            if (exception.getCause() instanceof Exception cause) throw cause;
+            throw exception;
+        }
+    }
+
     WorkerProgress awaitConsumed(int expected, Duration timeout) throws Exception {
         long deadline = System.nanoTime() + timeout.toNanos();
         WorkerProgress latest = progress();

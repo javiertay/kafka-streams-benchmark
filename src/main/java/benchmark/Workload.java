@@ -41,10 +41,14 @@ final class Workload {
     }
 
     static OutputEvent transform(InputEvent input, long processedAt) {
+        return transform(input, input.runId(), processedAt);
+    }
+
+    static OutputEvent transform(InputEvent input, String outputRunId, long processedAt) {
         long value = 1125899906842597L;
         String material = input.key() + ':' + input.payload();
         for (int i = 0; i < material.length(); i++) value = 31 * value + material.charAt(i);
-        return new OutputEvent(input.eventId(), input.runId(), input.sequenceNumber(), input.key(),
+        return new OutputEvent(input.eventId(), outputRunId, input.sequenceNumber(), input.key(),
                 input.generatedTimestamp(), processedAt, input.payload(), value);
     }
 

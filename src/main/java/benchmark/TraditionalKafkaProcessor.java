@@ -2,6 +2,7 @@ package benchmark;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.errors.WakeupException;
@@ -10,6 +11,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Collection;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -21,23 +23,25 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final StageMetrics metrics;
     private final Config config;
-    private final ResourceSampler resources = new ResourceSampler();
-    private final long initialGcCount = ResourceSampler.gcCount();
-    private final long initialGcTime = ResourceSampler.gcTime();
+    private volatile ResourceSampler resources;
+    private long initialGcCount;
+    private long initialGcTime;
     private final KafkaProducer<String, String> producer;
     private final KafkaConsumer<String, String> consumer;
     private final Thread consumerThread;
     private final String runId;
+    private final ProcessingGate gate;
     private final Workload.PartitionedWindows windows = new Workload.PartitionedWindows();
     private final Map<Long, Workload.WindowAccumulator> globalWindows = new HashMap<>();
     private final Map<Long, Integer> receivedParts = new HashMap<>();
     // Same per-job business-rule type used by KafkaStreamsProcessor; only Kafka plumbing differs.
     private final Map<String, VehicleCongestionRule> congestionRules = new HashMap<>();
 
-    TraditionalKafkaProcessor(Config config, WorkerCommand command, StageMetrics metrics) throws Exception {
+    TraditionalKafkaProcessor(Config config, WorkerCommand command, StageMetrics metrics, ProcessingGate gate) throws Exception {
         this.config = config;
         this.metrics = metrics;
         this.runId = command.runId();
+        this.gate = gate;
         producer = KafkaSupport.producer(config);
         consumer = KafkaSupport.consumer(config, command.groupId());
         CountDownLatch ready = new CountDownLatch(1);
@@ -49,12 +53,23 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
 
     private void consume(Config config, WorkerCommand command, CountDownLatch ready) {
         consumer.subscribe(config.processingMode() == ProcessingMode.METADATA
-                ? List.of(config.inputTopic(), config.partialTopic()) : List.of(config.inputTopic()));
+                ? List.of(config.inputTopic(), config.partialTopic()) : List.of(config.inputTopic()),
+                new ConsumerRebalanceListener() {
+                    @Override public void onPartitionsRevoked(Collection<org.apache.kafka.common.TopicPartition> partitions) {}
+
+                    @Override public void onPartitionsAssigned(Collection<org.apache.kafka.common.TopicPartition> partitions) {
+                        // Pausing in the assignment callback prevents poll from returning and advancing backlog
+                        // records before the coordinator releases every stable group member.
+                        if (!gate.isOpen()) consumer.pause(partitions);
+                    }
+                });
         long nextCommit = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(KafkaSupport.COMMIT_INTERVAL_MS);
         try {
             while (running.get()) {
+                if (gate.isOpen() && !consumer.paused().isEmpty()) consumer.resume(consumer.paused());
                 var records = consumer.poll(Duration.ofMillis(250));
                 ready.countDown();
+                if (!gate.isOpen()) continue;
                 for (ConsumerRecord<String, String> record : records) {
                     if (record.topic().equals(config.partialTopic())) processPartial(config, command, record);
                     else process(config, command, record);
@@ -80,6 +95,14 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
     }
 
     private void process(Config config, WorkerCommand command, ConsumerRecord<String, String> record) {
+        if (command.benchmarkType() == BenchmarkType.INGESTION_ONLY) {
+            if (record.key() != null && record.key().startsWith(command.workloadId() + "|")
+                    && !record.key().startsWith(command.workloadId() + "|marker-")) {
+                metrics.ingested();
+                consumed.incrementAndGet();
+            }
+            return;
+        }
         long started = System.nanoTime();
         if (config.processingMode() == ProcessingMode.VEHICLE_CONGESTION) {
             processVehicle(command, record, started);
@@ -91,7 +114,7 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
         } catch (IllegalArgumentException ignored) {
             return;
         }
-        if (!command.runId().equals(input.runId())) return;
+        if (!command.workloadId().equals(input.runId())) return;
         if (config.processingMode() == ProcessingMode.METADATA && input.sequenceNumber() < 0) {
             publishPartial(command, input.windowIndex(), record.partition());
             return;
@@ -104,7 +127,7 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
             metrics.processed(System.nanoTime() - started);
             return;
         }
-        OutputEvent output = Workload.transform(input, System.currentTimeMillis());
+        OutputEvent output = Workload.transform(input, command.runId(), System.currentTimeMillis());
         publish(output);
         consumed.incrementAndGet();
         metrics.processed(System.nanoTime() - started);
@@ -114,7 +137,7 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
         FrameEvent frame;
         try { frame = EventCodec.readFrame(record.value()); }
         catch (IllegalArgumentException ignored) { return; }
-        if (!frame.jobId().startsWith(command.runId() + ":job-")) return;
+        if (!frame.jobId().startsWith(command.workloadId() + ":job-")) return;
         metrics.ingested();
         // Kafka keeps each jobId key ordered within its assigned partition.
         FindingPayload finding = congestionRules.computeIfAbsent(frame.jobId(), ignored -> new VehicleCongestionRule(config))
@@ -164,14 +187,23 @@ final class TraditionalKafkaProcessor implements ProcessorSession {
         return new WorkerProgress(runId, consumed.get(), published.get());
     }
 
+    @Override public synchronized void resume() {
+        if (resources != null) return;
+        initialGcCount = ResourceSampler.gcCount();
+        initialGcTime = ResourceSampler.gcTime();
+        resources = new ResourceSampler();
+        gate.open();
+    }
+
     @Override public ProcessorReport stop() throws InterruptedException {
         running.set(false);
         consumer.wakeup();
         consumerThread.join();
         producer.flush();
         producer.close();
-        resources.close();
-        return new ProcessorReport(consumed.get(), published.get(), metrics.snapshot(), resources.result(), resources.samples(),
+        ResourceSampler sampler = resources == null ? new ResourceSampler() : resources;
+        sampler.close();
+        return new ProcessorReport(consumed.get(), published.get(), metrics.snapshot(), sampler.result(), sampler.samples(),
                 Math.max(0, ResourceSampler.gcCount() - initialGcCount),
                 Math.max(0, ResourceSampler.gcTime() - initialGcTime));
     }

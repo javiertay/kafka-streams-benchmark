@@ -24,24 +24,31 @@ final class KafkaStreamsProcessor implements ProcessorSession {
     private final AtomicInteger consumed = new AtomicInteger();
     private final AtomicInteger forwarded = new AtomicInteger();
     private final StageMetrics metrics;
-    private final ResourceSampler resources = new ResourceSampler();
-    private final long initialGcCount = ResourceSampler.gcCount();
-    private final long initialGcTime = ResourceSampler.gcTime();
+    private volatile ResourceSampler resources;
+    private long initialGcCount;
+    private long initialGcTime;
     private final KafkaStreams streams;
     private final String runId;
+    private final ProcessingGate gate;
 
-    KafkaStreamsProcessor(Config config, WorkerCommand command, StageMetrics metrics) throws Exception {
+    KafkaStreamsProcessor(Config config, WorkerCommand command, StageMetrics metrics, ProcessingGate gate) throws Exception {
         this.metrics = metrics;
         this.runId = command.runId();
+        this.gate = gate;
         streams = new KafkaStreams(buildTopology(config, command),
                 KafkaSupport.streamsProperties(config, command.groupId(), command.runId(), 1));
+        // Pause before start so every instance can join and rebalance while no backlog records are processed.
+        // Kafka Streams continues polling and heartbeating a paused topology, unlike blocking a stream callback.
+        streams.pause();
         awaitRunning(config.timeoutSeconds());
     }
 
     private Topology buildTopology(Config config, WorkerCommand command) {
         StreamsBuilder builder = new StreamsBuilder();
         var input = builder.stream(config.inputTopic(), Consumed.with(Serdes.String(), Serdes.String()));
-        if (config.processingMode() == ProcessingMode.METADATA) {
+        if (command.benchmarkType() == BenchmarkType.INGESTION_ONLY) {
+            input.processValues(() -> ingestionProcessor(command));
+        } else if (config.processingMode() == ProcessingMode.METADATA) {
             input.process(() -> metadataPartialProcessor(command))
                     .to(config.partialTopic(), Produced.with(Serdes.String(), Serdes.String()));
             builder.stream(config.partialTopic(), Consumed.with(Serdes.String(), Serdes.String()))
@@ -57,6 +64,33 @@ final class KafkaStreamsProcessor implements ProcessorSession {
         return builder.build();
     }
 
+    private FixedKeyProcessor<String, String, Void> ingestionProcessor(WorkerCommand command) {
+        return new FixedKeyProcessor<>() {
+            private boolean started;
+
+            @Override public void init(FixedKeyProcessorContext<String, Void> context) {}
+
+            @Override public void process(FixedKeyRecord<String, String> record) {
+                awaitStart();
+                if (!isDatasetRecord(record.key(), command.workloadId())) return;
+                metrics.ingested();
+                consumed.incrementAndGet();
+            }
+
+            private void awaitStart() {
+                if (!started) {
+                    gate.await();
+                    started = true;
+                }
+            }
+        };
+    }
+
+    private static boolean isDatasetRecord(String key, String workloadId) {
+        return key != null && key.startsWith(workloadId + "|")
+                && !key.startsWith(workloadId + "|marker-");
+    }
+
     private FixedKeyProcessor<String, String, String> transformProcessor(WorkerCommand command) {
         return new FixedKeyProcessor<>() {
             private FixedKeyProcessorContext<String, String> context;
@@ -66,11 +100,12 @@ final class KafkaStreamsProcessor implements ProcessorSession {
             }
 
             @Override public void process(FixedKeyRecord<String, String> record) {
+                gate.await();
                 long started = System.nanoTime();
                 InputEvent input = EventCodec.readInput(record.value());
-                if (!command.runId().equals(input.runId())) return;
+                if (!command.workloadId().equals(input.runId())) return;
                 metrics.ingested();
-                OutputEvent output = Workload.transform(input, System.currentTimeMillis());
+                OutputEvent output = Workload.transform(input, command.runId(), System.currentTimeMillis());
                 context.forward(record.withValue(EventCodec.write(output)));
                 forwarded.incrementAndGet();
                 consumed.incrementAndGet();
@@ -89,9 +124,10 @@ final class KafkaStreamsProcessor implements ProcessorSession {
             }
 
             @Override public void process(Record<String, String> record) {
+                gate.await();
                 long started = System.nanoTime();
                 InputEvent input = EventCodec.readInput(record.value());
-                if (!command.runId().equals(input.runId())) return;
+                if (!command.workloadId().equals(input.runId())) return;
                 if (input.sequenceNumber() < 0) {
                     long flushStarted = System.nanoTime();
                     Workload.WindowAccumulator aggregate = windows.remove(input.windowIndex());
@@ -121,11 +157,12 @@ final class KafkaStreamsProcessor implements ProcessorSession {
             @Override public void init(FixedKeyProcessorContext<String, String> context) { this.context = context; }
 
             @Override public void process(FixedKeyRecord<String, String> record) {
+                gate.await();
                 long started = System.nanoTime();
                 FrameEvent frame;
                 try { frame = EventCodec.readFrame(record.value()); }
                 catch (IllegalArgumentException ignored) { return; }
-                if (!frame.jobId().startsWith(command.runId() + ":job-")) return;
+                if (!frame.jobId().startsWith(command.workloadId() + ":job-")) return;
                 metrics.ingested();
                 // One independent state machine per simulated camera-processing job.
                 FindingPayload finding = rules.computeIfAbsent(frame.jobId(), ignored -> new VehicleCongestionRule(config))
@@ -185,10 +222,20 @@ final class KafkaStreamsProcessor implements ProcessorSession {
         return new WorkerProgress(runId, consumed.get(), forwarded.get());
     }
 
+    @Override public synchronized void resume() {
+        if (resources != null) return;
+        initialGcCount = ResourceSampler.gcCount();
+        initialGcTime = ResourceSampler.gcTime();
+        resources = new ResourceSampler();
+        gate.open();
+        streams.resume();
+    }
+
     @Override public ProcessorReport stop() {
         streams.close(Duration.ofSeconds(30));
-        resources.close();
-        return new ProcessorReport(consumed.get(), forwarded.get(), metrics.snapshot(), resources.result(), resources.samples(),
+        ResourceSampler sampler = resources == null ? new ResourceSampler() : resources;
+        sampler.close();
+        return new ProcessorReport(consumed.get(), forwarded.get(), metrics.snapshot(), sampler.result(), sampler.samples(),
                 Math.max(0, ResourceSampler.gcCount() - initialGcCount),
                 Math.max(0, ResourceSampler.gcTime() - initialGcTime));
     }

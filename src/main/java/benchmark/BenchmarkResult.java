@@ -18,12 +18,13 @@ record RuntimeDetails(String javaVersion, String javaVendor, String vmName,
                       long gcCount, long gcTimeMs) {}
 
 record BenchmarkResult(
-        String implementation, String timestamp, String runId, int iteration,
-        int eventCount, int durationSeconds, int outputIntervalSeconds,
+        String implementation, BenchmarkType benchmarkType, String timestamp, String runId, int iteration,
+        int eventCount, long inputBytes, int durationSeconds, int outputIntervalSeconds,
         int requestedPartitions, int actualPartitions, int payloadBytes,
         int serviceInstances, java.util.List<Integer> eventsConsumedPerService,
         double ingestionElapsedSeconds, double ingestionThroughput,
         double processingElapsedSeconds, double processingThroughput, Latency processingLatency,
+        double activeProcessingSeconds, double activeProcessingThroughput, double meanProcessingLatencyMs,
         Latency metadataFlushLatency,
         double publishingElapsedSeconds, double publishingThroughput, Latency publishingLatency,
         double totalElapsedSeconds, double totalThroughput,

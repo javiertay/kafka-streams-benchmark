@@ -89,7 +89,7 @@ final class KafkaSupport {
         properties.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
-        properties.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 1000);
+        properties.putIfAbsent(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 1000);
         return properties;
     }
 
@@ -104,7 +104,9 @@ final class KafkaSupport {
         properties.put(StreamsConfig.STATE_DIR_CONFIG,
                 Path.of(System.getProperty("java.io.tmpdir"), runId).toString());
         properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        properties.put(StreamsConfig.consumerPrefix(ConsumerConfig.MAX_POLL_RECORDS_CONFIG), 1000);
+        Object maxPollRecords = config.extraKafkaProperties().containsKey(ConsumerConfig.MAX_POLL_RECORDS_CONFIG)
+                ? config.extraKafkaProperties().get(ConsumerConfig.MAX_POLL_RECORDS_CONFIG) : 1000;
+        properties.put(StreamsConfig.consumerPrefix(ConsumerConfig.MAX_POLL_RECORDS_CONFIG), maxPollRecords);
         properties.put(StreamsConfig.producerPrefix(ProducerConfig.ACKS_CONFIG), "all");
         properties.put(StreamsConfig.producerPrefix(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG), true);
         return properties;
@@ -119,6 +121,33 @@ final class KafkaSupport {
             Map<TopicPartition, OffsetAndMetadata> offsets = new java.util.LinkedHashMap<>();
             for (TopicPartition partition : partitions) offsets.put(partition, new OffsetAndMetadata(consumer.position(partition)));
             consumer.commitSync(offsets);
+        }
+    }
+
+    static Map<Integer, Long> endOffsets(Config config, String topic) {
+        try (KafkaConsumer<String, String> consumer = consumer(config, "offset-reader-" + java.util.UUID.randomUUID())) {
+            List<TopicPartition> partitions = consumer.partitionsFor(topic).stream()
+                    .map(info -> new TopicPartition(topic, info.partition())).toList();
+            Map<TopicPartition, Long> offsets = consumer.endOffsets(partitions);
+            Map<Integer, Long> result = new java.util.LinkedHashMap<>();
+            partitions.forEach(partition -> result.put(partition.partition(), offsets.get(partition)));
+            return Map.copyOf(result);
+        }
+    }
+
+    static void prepareGroupAtOffsets(Config config, String group, String topic, Map<Integer, Long> offsets) {
+        try (KafkaConsumer<String, String> consumer = consumer(config, group)) {
+            List<TopicPartition> partitions = consumer.partitionsFor(topic).stream()
+                    .map(info -> new TopicPartition(topic, info.partition())).toList();
+            Map<TopicPartition, OffsetAndMetadata> commits = new java.util.LinkedHashMap<>();
+            for (TopicPartition partition : partitions) {
+                Long offset = offsets.get(partition.partition());
+                if (offset == null)
+                    throw new IllegalArgumentException("No prepared offset for " + partition);
+                commits.put(partition, new OffsetAndMetadata(offset));
+            }
+            consumer.assign(partitions);
+            consumer.commitSync(commits);
         }
     }
 
